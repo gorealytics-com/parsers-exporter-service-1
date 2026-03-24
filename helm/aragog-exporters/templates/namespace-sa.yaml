@@ -1,0 +1,29 @@
+{{/*
+=======================================================================
+  Namespace (optional — set to false if namespace is pre-created)
+=======================================================================
+*/}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespace }}
+  labels:
+    {{- include "helm-charts.labels" . | nindent 4 }}
+
+{{/*
+=======================================================================
+  ServiceAccount — shared by all pods
+  Vault Agent Injector requires a service account with Vault role binding.
+=======================================================================
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "helm-charts.fullname" . }}-sa
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "helm-charts.labels" . | nindent 4 }}
+  annotations:
+    vault.hashicorp.com/role: {{ .Values.vault.role | quote }}

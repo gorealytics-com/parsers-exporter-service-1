@@ -1,0 +1,55 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Items Produced/sec",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(aragog_exporter_items_produced_total[5m])) by (exporter)", "legendFormat": "{{exporter}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "title": "Items Skipped/sec by Reason",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(rate(aragog_exporter_items_skipped_total[5m])) by (exporter, reason)", "legendFormat": "{{exporter}} - {{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "title": "Batch Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(aragog_exporter_batch_duration_seconds_bucket[5m])) by (le, exporter))", "legendFormat": "p50 {{exporter}}"},
+        {"expr": "histogram_quantile(0.95, sum(rate(aragog_exporter_batch_duration_seconds_bucket[5m])) by (le, exporter))", "legendFormat": "p95 {{exporter}}"},
+        {"expr": "histogram_quantile(0.99, sum(rate(aragog_exporter_batch_duration_seconds_bucket[5m])) by (le, exporter))", "legendFormat": "p99 {{exporter}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "title": "Redis Queue Depth",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "aragog_exporter_redis_queue_length", "legendFormat": "{{exporter}} - {{queue}}"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "title": "Kafka Produce Errors",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "targets": [{"expr": "sum(rate(aragog_exporter_kafka_produce_errors_total[5m])) by (exporter)", "legendFormat": "{{exporter}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aragog", "exporters"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "title": "Aragog — Exporter Overview",
+  "uid": "aragog-exporter-overview"
+}

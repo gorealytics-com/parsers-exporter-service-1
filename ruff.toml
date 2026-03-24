@@ -1,0 +1,22 @@
+# ruff.toml
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "ANN"]
+ignore = [
+    "E203",   # whitespace before ':' (from setup.cfg)
+    "E501",   # line length (handled by formatter)
+    "W503",   # line break before binary operator (from setup.cfg)
+    "W605",   # invalid escape sequence (from setup.cfg)
+    "ANN101", # missing type annotation for self
+    "ANN102", # missing type annotation for cls
+]
+
+[lint.isort]
+profile = "black"
+known-first-party = ["exporter_base", "libs"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

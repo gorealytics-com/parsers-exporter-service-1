@@ -1,0 +1,94 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci-tests.yml
+
+  docker-build:
+    needs: ci
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: org-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=org-exporter
+          - service: review-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=review-exporter
+          - service: pg-writer
+            dockerfile: docker/Dockerfile.writer
+            build_arg: SERVICE_NAME=pg-writer
+          - service: ch-writer
+            dockerfile: docker/Dockerfile.writer
+            build_arg: SERVICE_NAME=ch-writer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_arg }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:stage-${{ github.sha }}
+
+  # ArgoCD auto-syncs stage Application from staging branch
+
+  smoke-tests:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    environment: staging
+    steps:
+      - name: Health checks via kubectl
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 5m
+          script: |
+            echo "Checking exporters..."
+            kubectl get pods -n aragog-stage -l aragog.io/component=exporter --no-headers | head -5
+
+            echo "Checking writers..."
+            kubectl get pods -n aragog-stage -l aragog.io/component=writer --no-headers
+
+            echo "Checking HPA status..."
+            kubectl get hpa -n aragog-stage --no-headers | head -5
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [docker-build, smoke-tests]
+    if: always()
+    steps:
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: '#parsing-exporters-stage'
+          slack-message: |
+            *Staging Deploy*: ${{ needs.docker-build.result }}
+            *Smoke Tests*: ${{ needs.smoke-tests.result }}
+            Commit: `${{ github.sha }}`
+            By: ${{ github.actor }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

@@ -1,0 +1,55 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Records Written/sec",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(aragog_writer_records_written_total[5m])) by (writer, schema)", "legendFormat": "{{writer}} - {{schema}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "title": "Write Errors/sec",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(rate(aragog_writer_errors_total[5m])) by (writer, schema)", "legendFormat": "{{writer}} - {{schema}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "title": "Batch Write Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(aragog_writer_batch_write_seconds_bucket[5m])) by (le, writer))", "legendFormat": "p50 {{writer}}"},
+        {"expr": "histogram_quantile(0.95, sum(rate(aragog_writer_batch_write_seconds_bucket[5m])) by (le, writer))", "legendFormat": "p95 {{writer}}"},
+        {"expr": "histogram_quantile(0.99, sum(rate(aragog_writer_batch_write_seconds_bucket[5m])) by (le, writer))", "legendFormat": "p99 {{writer}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "title": "Buffer Size (Pending Records)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "aragog_writer_buffer_size", "legendFormat": "{{writer}}"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "title": "Kafka Consumer Lag",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "targets": [{"expr": "kafka_consumergroup_lag{group=~\"aragog-.*\"}", "legendFormat": "{{group}} - {{topic}}/{{partition}}"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aragog", "writers"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "title": "Aragog — Writer Overview",
+  "uid": "aragog-writer-overview"
+}

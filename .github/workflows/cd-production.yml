@@ -1,0 +1,119 @@
+name: Production Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      emergency_bypass:
+        description: "Skip standard approval (hotfix)"
+        type: boolean
+        default: false
+      bypass_reason:
+        description: "Reason for bypass (required if true)"
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+
+  ci-gate:
+    uses: ./.github/workflows/ci-tests.yml
+
+  release:
+    needs: ci-gate
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.semantic.outputs.new_release_version }}
+      released: ${{ steps.semantic.outputs.new_release_published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install semantic-release plugins
+        run: |
+          npm install -g semantic-release \
+            @semantic-release/exec \
+            @semantic-release/git
+
+      - name: Semantic Release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          extra_plugins: |
+            @semantic-release/exec
+            @semantic-release/git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-build:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: org-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=org-exporter
+          - service: review-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=review-exporter
+          - service: pg-writer
+            dockerfile: docker/Dockerfile.writer
+            build_arg: SERVICE_NAME=pg-writer
+          - service: ch-writer
+            dockerfile: docker/Dockerfile.writer
+            build_arg: SERVICE_NAME=ch-writer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_arg }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:v${{ needs.release.outputs.new_version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+
+  # Chart version bump is handled by semantic-release @semantic-release/exec + @semantic-release/git
+  # ArgoCD watches the repo and auto-syncs when Chart.yaml changes
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [release, docker-build]
+    if: always()
+    steps:
+      - name: Notify Slack
+        if: needs.release.outputs.released == 'true'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: '#parsing-exporters-prod'
+          slack-message: |
+            *Production Release* :rocket:
+            Version: `v${{ needs.release.outputs.new_version }}`
+            Docker: `${{ needs.docker-build.result }}`
+            Commit: `${{ github.sha }}`
+            By: ${{ github.actor }}
+            ArgoCD will auto-sync the new chart version.
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

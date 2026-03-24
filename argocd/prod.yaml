@@ -1,0 +1,25 @@
+# ArgoCD: https://argocd.prod.rea/applications
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aragog-exporters-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/gorealytics-com/aragog-exporters.git
+    targetRevision: main
+    path: helm/aragog-exporters
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: aragog-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

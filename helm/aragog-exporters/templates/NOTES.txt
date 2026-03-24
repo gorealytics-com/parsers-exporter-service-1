@@ -1,0 +1,37 @@
+=======================================================================
+  aragog-exporters deployed successfully!
+=======================================================================
+
+Namespace: {{ .Values.global.namespace }}
+
+📦 Exporters:
+{{- range $name, $cfg := .Values.exporters }}
+   • exporter-{{ $name }} → {{ $cfg.queue }}
+     Type: {{ $cfg.type | default "organization" }} | Topic: {{ include "helm-charts.kafkaTopic" (dict "type" ($cfg.type | default "organization") "topics" $.Values.kafka.topics) }}
+{{- end }}
+
+✍️ Writers:
+{{- if .Values.writers.pg.enabled }}
+   • pg-writer → {{ .Values.kafka.topics.orgsValidated }} → PostgreSQL
+     Consumer group: {{ .Values.writers.pg.consumerGroup }}
+{{- end }}
+{{- if .Values.writers.ch.enabled }}
+   • ch-writer → {{ .Values.kafka.topics.reviewsValidated }} → ClickHouse
+     Consumer group: {{ .Values.writers.ch.consumerGroup }}
+{{- end }}
+
+{{- if .Values.pgbouncer.enabled }}
+🔌 PgBouncer:
+   • {{ include "helm-charts.fullname" . }}-pgbouncer.{{ .Values.global.namespace }}.svc:5432
+     Pool mode: {{ .Values.pgbouncer.poolMode }} | Max backend: {{ .Values.pgbouncer.maxDbConnections }}
+{{- end }}
+
+📊 Monitoring:
+   Grafana Prod: https://grafana.prod.k8s.rea
+   Grafana Dev:  https://grafana.dev.k8s.rea
+
+⚠️  Verify:
+   1. Vault injected:  kubectl get pods -n {{ .Values.global.namespace }} -o jsonpath='{.items[0].metadata.annotations}'
+   2. HPA active:      kubectl get hpa -n {{ .Values.global.namespace }}
+   3. Kafka topics:    kubectl exec -it kafka-0 -- kafka-topics.sh --list --bootstrap-server localhost:9092
+

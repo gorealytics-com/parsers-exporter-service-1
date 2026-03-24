@@ -1,0 +1,71 @@
+# =============================================================================
+# Stage Environment Overrides
+# =============================================================================
+vault:
+  role: "aragog-stage-read"
+  secretPath: "org/data/stage/aragog_exporters"
+
+global:
+  namespace: aragog-stage
+
+exporterDefaults:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  batchSize: 50
+  checkIntervalSeconds: 60
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPU: 70
+    targetMemory: 80
+    scaleDownStabilization: 300
+
+writers:
+  pg:
+    enabled: true
+    replicas: 1
+    batchSize: 100
+    flushIntervalMs: 2000
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+    hpa:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 2
+      targetCPU: 70
+      targetMemory: 80
+  ch:
+    enabled: true
+    replicas: 1
+    batchSize: 500
+    flushIntervalMs: 5000
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "256Mi"
+      limits:
+        cpu: "250m"
+        memory: "512Mi"
+    hpa:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 2
+      targetCPU: 70
+      targetMemory: 80
+
+pgbouncer:
+  enabled: true
+  replicas: 1
+  maxDbConnections: 10

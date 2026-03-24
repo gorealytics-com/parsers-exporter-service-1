@@ -1,0 +1,83 @@
+{{/*
+=======================================================================
+  Prometheus Alerting Rules
+  Alert routing: Alertmanager → Slack channels
+=======================================================================
+*/}}
+{{- if .Values.observability.prometheusRules.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "helm-charts.fullname" . }}-alerts
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "helm-charts.labels" . | nindent 4 }}
+    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: aragog-exporters
+      rules:
+        - alert: AragogExporterHighErrorRate
+          expr: |
+            (
+              rate(aragog_exporter_items_errored_total[5m])
+              / (rate(aragog_exporter_items_produced_total[5m]) + rate(aragog_exporter_items_errored_total[5m]) + 0.001)
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Exporter {{ "{{" }} $labels.exporter {{ "}}" }} error rate > 5%"
+            description: "Error rate is {{ "{{" }} $value | humanizePercentage {{ "}}" }} over last 5 minutes"
+
+        - alert: AragogKafkaProduceErrors
+          expr: rate(aragog_exporter_kafka_produce_errors_total[5m]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Exporter {{ "{{" }} $labels.exporter {{ "}}" }} has sustained Kafka produce errors"
+
+    - name: aragog-writers
+      rules:
+        - alert: AragogWriterHighErrorRate
+          expr: |
+            rate(aragog_writer_errors_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Writer {{ "{{" }} $labels.writer {{ "}}" }} DB write errors"
+
+        - alert: AragogWriterBufferGrowing
+          expr: aragog_writer_buffer_size > 100000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Writer {{ "{{" }} $labels.writer {{ "}}" }} buffer exceeds 100k records"
+
+    - name: aragog-infrastructure
+      rules:
+        - alert: AragogPodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="{{ .Values.global.namespace }}"}[1h]) > 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ "{{" }} $labels.pod {{ "}}" }} restarting frequently"
+
+        - alert: AragogKafkaConsumerLagHigh
+          expr: |
+            kafka_consumergroup_lag{group=~"aragog-.*"} > 100000
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Kafka consumer lag > 100k for group {{ "{{" }} $labels.group {{ "}}" }}"
+            description: "Lag is {{ "{{" }} $value {{ "}}" }} messages behind"
+{{- end }}

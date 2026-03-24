@@ -1,0 +1,53 @@
+# =============================================================================
+# Multi-stage Dockerfile for Aragog DB Writers
+# Shared by: pg-writer, ch-writer
+# Build arg SERVICE_NAME selects the concrete writer
+# Uses UV for dependency management
+# =============================================================================
+
+# --- Stage 1: Dependencies ---
+FROM python:3.11-slim AS deps
+
+RUN pip install uv
+WORKDIR /build
+
+COPY pyproject.toml uv.lock ./
+
+ARG SERVICE_NAME=pg-writer
+COPY services/${SERVICE_NAME}/pyproject.toml services/${SERVICE_NAME}/
+COPY libs/common/pyproject.toml libs/common/
+COPY libs/observability/pyproject.toml libs/observability/
+
+RUN uv pip install --system --no-cache \
+    -e services/${SERVICE_NAME} \
+    -e libs/common \
+    -e libs/observability
+
+# --- Stage 2: Runtime ---
+FROM python:3.11-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends bash \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r aragog && useradd -r -g aragog -d /app -s /bin/bash aragog
+
+WORKDIR /app
+
+COPY --from=deps /usr/local/lib/python3.11/site-packages/ /usr/local/lib/python3.11/site-packages/
+
+COPY libs/ /app/libs/
+
+ARG SERVICE_NAME=pg-writer
+COPY services/${SERVICE_NAME}/ /app/service/
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+EXPOSE 8080
+
+USER aragog
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+
+CMD ["python", "-m", "service.main"]

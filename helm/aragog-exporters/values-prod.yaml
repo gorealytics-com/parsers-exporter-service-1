@@ -1,0 +1,9 @@
+# =============================================================================
+# Production Environment Overrides
+# =============================================================================
+vault:
+  role: "aragog-prod-read"
+  secretPath: "org/data/prod/aragog_exporters"
+
+global:
+  namespace: aragog-prod

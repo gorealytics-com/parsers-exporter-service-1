@@ -1,0 +1,112 @@
+{{/*
+=======================================================================
+  Exporter Deployments — one per entry in .Values.exporters
+  Vault Agent Injector provides secrets via /vault/secrets/env
+=======================================================================
+*/}}
+{{- range $name, $cfg := .Values.exporters }}
+{{- $defaults := $.Values.exporterDefaults }}
+{{- $type := $cfg.type | default "organization" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exporter-{{ $name }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    {{- include "helm-charts.exporterLabels" (dict "root" $ "exporterName" $name "exporterType" $type) | nindent 4 }}
+spec:
+  replicas: {{ $cfg.replicas | default $defaults.replicas }}
+  selector:
+    matchLabels:
+      {{- include "helm-charts.exporterSelectorLabels" (dict "root" $ "exporterName" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "helm-charts.exporterSelectorLabels" (dict "root" $ "exporterName" $name) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $defaults.metrics.port | quote }}
+        prometheus.io/path: {{ $defaults.metrics.path | quote }}
+        # --- Vault Agent Injector ---
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: {{ $.Values.vault.role | quote }}
+        vault.hashicorp.com/agent-inject-secret-env: {{ $.Values.vault.secretPath | quote }}
+        vault.hashicorp.com/tls-skip-verify: "true"
+        vault.hashicorp.com/agent-inject-template-env: |
+          {{`{{- with secret `}}{{ $.Values.vault.secretPath | quote }}{{` -}}`}}
+          {{`{{ range $k, $v := .Data.data }}`}}
+          export {{`{{ $k }}`}}="{{`{{ $v }}`}}"
+          {{`{{ end }}`}}
+          {{`{{- end }}`}}
+    spec:
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: {{ include "helm-charts.fullname" $ }}-sa
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: exporter
+          image: "{{ $.Values.images.exporter.repository }}:{{ $.Values.images.exporter.tag }}"
+          imagePullPolicy: {{ $.Values.images.exporter.pullPolicy }}
+          # --- Vault: source secrets before starting Python ---
+          command: ["/bin/bash"]
+          args: ["-c", "source /vault/secrets/env && exec python -m service.main"]
+          ports:
+            - name: metrics
+              containerPort: {{ $defaults.metrics.port }}
+              protocol: TCP
+          env:
+            # --- Identity ---
+            - name: EXPORTER_NAME
+              value: {{ $name | quote }}
+            - name: EXPORTER_TYPE
+              value: {{ $type | quote }}
+            - name: SOURCE_NAME
+              value: {{ $cfg.sourceName | quote }}
+            - name: SCHEMA
+              value: {{ $cfg.schema | default "" | quote }}
+
+            # --- Redis ---
+            - name: REDIS_QUEUE
+              value: {{ $cfg.queue | quote }}
+            - name: BATCH_SIZE
+              value: {{ $cfg.batchSize | default $defaults.batchSize | quote }}
+            - name: CHECK_INTERVAL
+              value: {{ $cfg.checkIntervalSeconds | default $defaults.checkIntervalSeconds | quote }}
+
+            # --- Kafka producer ---
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ $.Values.kafka.bootstrapServers | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ include "helm-charts.kafkaTopic" (dict "type" $type "topics" $.Values.kafka.topics) | quote }}
+            - name: KAFKA_COMPRESSION
+              value: {{ $.Values.kafka.producer.compressionType | quote }}
+            - name: KAFKA_ACKS
+              value: {{ $.Values.kafka.producer.acks | quote }}
+
+            {{- if $cfg.dupefilterKey }}
+            # --- Dedup (reviews only) ---
+            - name: DUPEFILTER_KEY
+              value: {{ $cfg.dupefilterKey | quote }}
+            {{- end }}
+
+          resources:
+            {{- include "helm-charts.exporterResources" (dict "exporter" $cfg "defaults" $defaults) | nindent 12 }}
+
+          livenessProbe:
+            httpGet:
+              path: {{ $defaults.health.livenessPath }}
+              port: {{ $defaults.health.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: {{ $defaults.health.readinessPath }}
+              port: {{ $defaults.health.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+{{- end }}

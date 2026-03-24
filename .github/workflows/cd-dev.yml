@@ -1,0 +1,72 @@
+name: Deploy to Dev
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: dev-deploy
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci-tests.yml
+
+  docker-build:
+    needs: ci
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: org-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=org-exporter
+          - service: review-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=review-exporter
+          - service: pg-writer
+            dockerfile: docker/Dockerfile.writer
+            build_arg: SERVICE_NAME=pg-writer
+          - service: ch-writer
+            dockerfile: docker/Dockerfile.writer
+            build_arg: SERVICE_NAME=ch-writer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build_arg }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:dev-${{ github.sha }}
+
+  # ArgoCD auto-syncs dev Application from develop branch
+  # No manual helm upgrade needed
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: always()
+    steps:
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: '#parsing-exporters-dev'
+          slack-message: |
+            *Dev Deploy*: ${{ needs.docker-build.result }}
+            Commit: `${{ github.sha }}`
+            By: ${{ github.actor }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

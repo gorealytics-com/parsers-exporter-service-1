@@ -1,0 +1,490 @@
+# =============================================================================
+# aragog-exporters — Unified Helm Values
+# =============================================================================
+# This file replaces the old config.yaml.
+# All exporter/writer configs are defined here and templated via Helm `range`.
+# Secrets come from Vault Agent Injector (annotations on pods).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  namespace: aragog
+  imageRegistry: "ghcr.io/gorealytics-com/aragog-exporters"
+  imagePullSecrets:
+    - name: ghcr-secret
+
+  labels:
+    app.kubernetes.io/part-of: aragog
+    app.kubernetes.io/managed-by: helm
+
+# ---------------------------------------------------------------------------
+# Vault Agent Injector
+# ---------------------------------------------------------------------------
+vault:
+  # Vault UI: https://vault.rea:8200/ui
+  address: "https://vault.rea:8200"
+  role: "aragog-prod-read"
+  secretPath: "org/data/prod/aragog_exporters"
+
+# ---------------------------------------------------------------------------
+# Container images
+# ---------------------------------------------------------------------------
+images:
+  exporter:
+    repository: ghcr.io/gorealytics-com/aragog-exporters/exporter
+    tag: "latest"  # overridden by CI via --set images.exporter.tag=v1.2.3
+    pullPolicy: IfNotPresent
+  pgWriter:
+    repository: ghcr.io/gorealytics-com/aragog-exporters/pg-writer
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  chWriter:
+    repository: ghcr.io/gorealytics-com/aragog-exporters/ch-writer
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Kafka — connection & topic defaults
+# ---------------------------------------------------------------------------
+kafka:
+  bootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+  sasl:
+    enabled: false
+    mechanism: "SCRAM-SHA-512"
+  tls:
+    enabled: false
+
+  topics:
+    orgsValidated: "orgs.validated.v1"
+    reviewsValidated: "reviews.validated.v1"
+    orgsDlq: "orgs.dlq.v1"
+    reviewsDlq: "reviews.dlq.v1"
+
+  producer:
+    acks: "all"
+    compressionType: "lz4"
+    lingerMs: 50
+    batchSize: 65536
+
+# ---------------------------------------------------------------------------
+# Redis — connection defaults
+# ---------------------------------------------------------------------------
+redis:
+  defaultUrl: ""  # injected from Vault via env
+
+# ---------------------------------------------------------------------------
+# Exporter defaults (applied to all exporters unless overridden)
+# ---------------------------------------------------------------------------
+exporterDefaults:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  checkIntervalSeconds: 30
+  batchSize: 10000
+  metrics:
+    enabled: true
+    port: 8080
+    path: /metrics
+  health:
+    port: 8080
+    livenessPath: /health
+    readinessPath: /ready
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 20
+    targetCPU: 70
+    targetMemory: 80
+    scaleDownStabilization: 300
+
+# ---------------------------------------------------------------------------
+# Exporters — one Deployment + ScaledObject per entry
+# ---------------------------------------------------------------------------
+exporters:
+
+  # ===== Map/Directory Sources — Organization Exporters =====
+
+  bing-map-search:
+    type: organization
+    queue: "bing_map_search:items"
+    schema: source_42
+    sourceName: "Bing Org Update"
+    batchSize: 10000
+
+  tripadvisor-search:
+    type: organization
+    queue: "tripadvisor_search:items"
+    schema: source_33
+    sourceName: "Trip Org Update"
+    batchSize: 10000
+
+  yandex-map-orgs-update:
+    type: organization
+    queue: "yandex_map_orgs_update:items"
+    schema: source_49
+    sourceName: "Yandex Org Update"
+    batchSize: 10000
+
+  baidu-map-search:
+    type: organization
+    queue: "baidu_map_search:items"
+    schema: source_40
+    sourceName: "Baidu Org Update"
+    batchSize: 10000
+
+  yelp-search:
+    type: organization
+    queue: "yelp_search:items"
+    schema: source_39
+    sourceName: "Yelp Org Update"
+    batchSize: 10000
+
+  yahoo-map-search:
+    type: organization
+    queue: "yahoo_map_search:items"
+    schema: source_41
+    sourceName: "Yahoo Update"
+    batchSize: 10000
+
+  opentable-search:
+    type: organization
+    queue: "opentable_search:items"
+    schema: source_63
+    sourceName: "Opentable Org Update"
+    batchSize: 10000
+
+  # ===== Delivery Sources — Organization Exporters =====
+
+  delivery-com-search:
+    type: organization
+    queue: "delivery_com_search:items"
+    schema: source_54
+    sourceName: "DeliveryCom Update"
+    batchSize: 500
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+
+  doordash-search:
+    type: organization
+    queue: "doordash_search:items"
+    schema: source_53
+    sourceName: "Doordash Update"
+    batchSize: 1000
+
+  bond-delivery:
+    type: organization
+    queue: "delivery:source_23:items"
+    schema: source_23
+    sourceName: "Bond Update"
+    batchSize: 5000
+
+  fooderos-delivery:
+    type: organization
+    queue: "delivery:source_24:items"
+    schema: source_24
+    sourceName: "Fooderos Update"
+    batchSize: 5000
+
+  foody-delivery:
+    type: organization
+    queue: "delivery:source_25:items"
+    schema: source_25
+    sourceName: "Foody Update"
+    batchSize: 5000
+
+  ubereats-delivery:
+    type: organization
+    queue: "delivery:source_27:items"
+    schema: source_27
+    sourceName: "Ubereats Update"
+    batchSize: 5000
+    hpa:
+      maxReplicas: 30
+
+  ubereats-sitemap-delivery:
+    type: organization
+    queue: "delivery:source_27:sitemap:items"
+    schema: source_27
+    sourceName: "Ubereats Sitemap Update"
+    batchSize: 5000
+
+  wolt-delivery:
+    type: organization
+    queue: "delivery:source_28:items"
+    schema: source_28
+    sourceName: "Wolt Update"
+    batchSize: 5000
+
+  bistro-delivery:
+    type: organization
+    queue: "delivery:source_29:items"
+    schema: source_29
+    sourceName: "Bistro Update"
+    batchSize: 5000
+
+  pyszne-delivery:
+    type: organization
+    queue: "delivery:source_31:items"
+    schema: source_31
+    sourceName: "Pyszne Update"
+    batchSize: 5000
+
+  tazz-delivery:
+    type: organization
+    queue: "delivery:source_32:items"
+    schema: source_32
+    sourceName: "Tazz Update"
+    batchSize: 5000
+
+  loko-delivery:
+    type: organization
+    queue: "delivery:source_36:items"
+    schema: source_36
+    sourceName: "Loko Update"
+    batchSize: 5000
+
+  foodora-delivery:
+    type: organization
+    queue: "delivery:source_38:items"
+    schema: source_38
+    sourceName: "Foodora Update"
+    batchSize: 5000
+
+  foodora-sitemap-delivery:
+    type: organization
+    queue: "delivery:source_38:sitemap:items"
+    schema: source_38
+    sourceName: "Foodora Sitemap Update"
+    batchSize: 5000
+
+  misteram-delivery:
+    type: organization
+    queue: "delivery:source_43:items"
+    schema: source_43
+    sourceName: "Misteram Update"
+    batchSize: 5000
+
+  boltfood-delivery:
+    type: organization
+    queue: "delivery:source_44:items"
+    schema: source_44
+    sourceName: "Boltfood Update"
+    batchSize: 5000
+
+  jidlopodnos-delivery:
+    type: organization
+    queue: "delivery:source_45:items"
+    schema: source_45
+    sourceName: "Jidlopodnos Update"
+    batchSize: 5000
+
+  mixfood-delivery:
+    type: organization
+    queue: "delivery:source_51:items"
+    schema: source_51
+    sourceName: "Mixfood Update"
+    batchSize: 5000
+
+  tomato-delivery:
+    type: organization
+    queue: "delivery:source_52:items"
+    schema: source_52
+    sourceName: "Tomato Update"
+    batchSize: 5000
+
+  foodpanda-delivery:
+    type: organization
+    queue: "delivery:source_56:items"
+    schema: source_56
+    sourceName: "Foodpanda Update"
+    batchSize: 5000
+
+  foodpanda-sitemap-delivery:
+    type: organization
+    queue: "delivery:source_56:sitemap:items"
+    schema: source_56
+    sourceName: "Foodpanda Sitemap Update"
+    batchSize: 5000
+
+  takeaway-bg-delivery:
+    type: organization
+    queue: "delivery:source_57:items"
+    schema: source_57
+    sourceName: "TakeawayBg Update"
+    batchSize: 5000
+
+  grabfood-delivery:
+    type: organization
+    queue: "delivery:source_58:items"
+    schema: source_58
+    sourceName: "Grabfood Update"
+    batchSize: 5000
+
+  swiggy-delivery:
+    type: organization
+    queue: "delivery:source_61:items"
+    schema: source_61
+    sourceName: "Swiggy"
+    batchSize: 5000
+    hpa:
+      maxReplicas: 30
+
+  # ===== Review Exporters =====
+
+  tripadvisor-reviews:
+    type: reviews
+    queue: "tripadvisor_reviews:items"
+    schema: source_33
+    sourceName: "Tripadvisor"
+    batchSize: 10000
+    dupefilterKey: "tripadvisor:reviews_dupefilter"
+
+  yandex-map-reviews:
+    type: reviews
+    queue: "yandex_map_reviews:items"
+    schema: source_47
+    sourceName: "Yandex Maps"
+    batchSize: 50000
+    dupefilterKey: "yamap:reviews_dupefilter"
+
+  baidu-map-reviews:
+    type: reviews
+    queue: "baidu_map_reviews:items"
+    schema: source_40
+    sourceName: "Baidu"
+    batchSize: 10000
+    dupefilterKey: "baidu:reviews_dupefilter"
+
+  yelp-reviews:
+    type: reviews
+    queue: "yelp_reviews:items"
+    schema: source_39
+    sourceName: "Yelp"
+    batchSize: 10000
+    dupefilterKey: "yelp:reviews_dupefilter"
+
+  yahoo-reviews:
+    type: reviews
+    queue: "yahoo_map_reviews:items"
+    schema: source_41
+    sourceName: "Yahoo"
+    batchSize: 100000
+    dupefilterKey: "yahoo:reviews_dupefilter"
+
+  opentable-reviews:
+    type: reviews
+    queue: "opentable_reviews:items"
+    schema: source_63
+    sourceName: "Opentable"
+    batchSize: 100000
+    dupefilterKey: "opentable:reviews_dupefilter"
+
+# ---------------------------------------------------------------------------
+# DB Writers
+# ---------------------------------------------------------------------------
+writers:
+
+  pg:
+    enabled: true
+    replicas: 3
+    consumerGroup: "aragog-pg-writers"
+    topic: "orgs.validated.v1"
+    batchSize: 1000
+    flushIntervalMs: 5000
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+    hpa:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 12
+      targetCPU: 70
+      targetMemory: 80
+      scaleDownStabilization: 300
+
+  ch:
+    enabled: true
+    replicas: 2
+    consumerGroup: "aragog-ch-writers"
+    topic: "reviews.validated.v1"
+    batchSize: 50000
+    flushIntervalMs: 10000
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "1Gi"
+      limits:
+        cpu: "1000m"
+        memory: "2Gi"
+    hpa:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 12
+      targetCPU: 70
+      targetMemory: 80
+      scaleDownStabilization: 300
+
+# ---------------------------------------------------------------------------
+# PgBouncer
+# ---------------------------------------------------------------------------
+pgbouncer:
+  enabled: true
+  replicas: 2
+  image:
+    repository: bitnami/pgbouncer
+    tag: "1.22.0"
+  poolMode: transaction
+  maxClientConn: 200
+  defaultPoolSize: 10
+  maxDbConnections: 50
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "128Mi"
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+observability:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    labels:
+      release: prometheus
+  prometheusRules:
+    enabled: true
+  grafanaDashboard:
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Slack alerting
+# ---------------------------------------------------------------------------
+slack:
+  # Bot token — store in GitHub Actions secrets as SLACK_BOT_TOKEN
+  botToken: ""
+  channels:
+    dev: "#parsing-exporters-dev"
+    stage: "#parsing-exporters-stage"
+    prod: "#parsing-exporters-prod"

@@ -1,0 +1,175 @@
+name: Lint, Validate and Test
+
+on:
+  push:
+    branches: [main, staging, develop]
+  pull_request:
+  workflow_call:
+
+jobs:
+  lint-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install UV
+        run: pip install uv
+
+      - name: Install dev deps
+        run: uv sync
+
+      - name: Pre-commit checks
+        run: |
+          uv run pre-commit run --all-files
+
+      - name: YAML lint
+        run: |
+          uv run yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" \
+            helm/aragog-exporters/values.yaml
+
+      - name: Validate values.yaml
+        run: uv run python scripts/ci_validate.py
+
+      - name: Helm lint
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm lint helm/aragog-exporters/
+
+      - name: Verify no banned imports
+        run: |
+          echo "Checking for stdlib logging..."
+          ! grep -rn "import logging" services/ libs/ --include="*.py" || exit 1
+          echo "Checking for typing.Dict/List..."
+          ! grep -rn "typing\.Dict\|typing\.List\|typing\.Optional\|typing\.Tuple" services/ libs/ --include="*.py" || exit 1
+          echo "Checking for multiprocessing/dask..."
+          ! grep -rn "import multiprocessing\|from dask\|import dask" services/ libs/ --include="*.py" || exit 1
+          echo "Checking for print()..."
+          ! grep -Prn "^\s*print\(" services/ libs/ --include="*.py" || exit 1
+          echo "✅ All checks passed"
+
+  test-unit:
+    runs-on: ubuntu-latest
+    needs: lint-validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install UV + deps
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/unit/ -v --tb=short \
+            --cov=services --cov=libs \
+            --cov-report=term-missing \
+            -m "not integration"
+
+  test-integration:
+    runs-on: ubuntu-latest
+    needs: lint-validate
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aragog_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        ports: ["8123:8123", "9000:9000"]
+        options: >-
+          --health-cmd "wget --spider -q localhost:8123/ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      kafka:
+        image: bitnami/kafka:3.7
+        ports: ["9092:9092"]
+        env:
+          KAFKA_CFG_NODE_ID: "0"
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@localhost:9093
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install UV + deps
+        run: |
+          pip install uv
+          uv sync
+
+      - name: Init PostgreSQL schemas
+        run: |
+          PGPASSWORD=test psql -h localhost -U test -d aragog_test \
+            -f init-scripts/postgres/01-init-schemas.sql
+
+      - name: Init ClickHouse databases
+        run: |
+          for i in $(seq 1 10); do
+            curl -s "http://localhost:8123/ping" && break
+            sleep 2
+          done
+          grep -v '^--' init-scripts/clickhouse/01-init-tables.sql \
+            | tr '\n' ' ' \
+            | sed 's/;/;\n/g' \
+            | while IFS= read -r stmt; do
+                stmt=$(echo "$stmt" | xargs | sed 's/;$//')
+                [ -z "$stmt" ] && continue
+                curl -sS "http://localhost:8123/" --data-binary "$stmt" || exit 1
+              done
+
+      - name: Run integration tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          PG_URI: postgresql://test:test@localhost:5432/aragog_test
+          ARAGOG_SERVICE_PG: postgresql://test:test@localhost:5432/aragog_test
+          CLICKHOUSE_HOST: localhost
+          CLICKHOUSE_PORT: "8123"
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          TELEGRAM_BOT_TOKEN: fake-token
+          TELEGRAM_CHAT_ID: fake-chat
+          LOG_LEVEL: DEBUG
+        run: |
+          uv run pytest tests/integration/ -v --tb=short \
+            --cov=services --cov=libs \
+            --cov-report=term-missing \
+            -m integration
