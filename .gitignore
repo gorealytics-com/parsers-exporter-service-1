@@ -46,3 +46,5 @@ helm/aragog-exporters/charts/
 *.log
 *.tmp
 local.readme.md
+
+argocd/

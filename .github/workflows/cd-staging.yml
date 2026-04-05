@@ -11,6 +11,8 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ${{ github.repository }}
+  HELM_REPO: gorealytics-com/helm-charts-parsers
+  CHART_PATH: aragog-exporters/Chart.yaml
 
 jobs:
   ci:
@@ -58,33 +60,35 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:stage-${{ github.sha }}
 
-  # ArgoCD auto-syncs stage Application from staging branch
-
-  smoke-tests:
-    runs-on: ubuntu-latest
+  bump-chart:
     needs: docker-build
-    environment: staging
+    runs-on: ubuntu-latest
     steps:
-      - name: Health checks via kubectl
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Checkout helm-charts-parsers
+        uses: actions/checkout@v4
         with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          command_timeout: 5m
-          script: |
-            echo "Checking exporters..."
-            kubectl get pods -n aragog-stage -l aragog.io/component=exporter --no-headers | head -5
+          repository: ${{ env.HELM_REPO }}
+          token: ${{ secrets.HELM_REPO_PAT }}
+          path: helm-repo
 
-            echo "Checking writers..."
-            kubectl get pods -n aragog-stage -l aragog.io/component=writer --no-headers
+      - name: Update stage image tags
+        run: |
+          cd helm-repo
+          TAG="stage-${{ github.sha }}"
+          sed -i "s/^appVersion:.*/appVersion: \"${TAG}\"/" ${{ env.CHART_PATH }}
 
-            echo "Checking HPA status..."
-            kubectl get hpa -n aragog-stage --no-headers | head -5
+      - name: Commit and push
+        run: |
+          cd helm-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --cached --quiet || git commit -m "chore(aragog-stage): update to stage-${{ github.sha }}"
+          git push
 
   notify:
     runs-on: ubuntu-latest
-    needs: [docker-build, smoke-tests]
+    needs: [docker-build, bump-chart]
     if: always()
     steps:
       - name: Notify Slack
@@ -93,7 +97,7 @@ jobs:
           channel-id: '#parsing-exporters-stage'
           slack-message: |
             *Staging Deploy*: ${{ needs.docker-build.result }}
-            *Smoke Tests*: ${{ needs.smoke-tests.result }}
+            Chart bump: ${{ needs.bump-chart.result }}
             Commit: `${{ github.sha }}`
             By: ${{ github.actor }}
         env:
