@@ -45,3 +45,4 @@ helm/aragog-exporters/charts/
 # Misc
 *.log
 *.tmp
+local.readme.md

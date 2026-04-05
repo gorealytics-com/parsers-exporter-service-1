@@ -2,12 +2,14 @@
 name = "aragog-exporters"
 version = "0.1.0"
 requires-python = ">=3.10"
-description = "Event-Driven Architecture for parsers-exporter-service: exporters (Redis → Kafka) + DB writers (Kafka → PostgreSQL/ClickHouse)"
+description = "Event-Driven Architecture for parsers-exporter-service: 4 exporter types (Redis → Kafka) + 2 writer types (Kafka → PostgreSQL/ClickHouse)"
 
 [tool.uv.workspace]
 members = [
     "services/exporter-base",
     "services/org-exporter",
+    "services/delivery-exporter",
+    "services/sitemap-exporter",
     "services/review-exporter",
     "services/pg-writer",
     "services/ch-writer",
@@ -15,8 +17,8 @@ members = [
     "libs/observability",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.1",
@@ -31,4 +33,6 @@ dev-dependencies = [
     "types-redis>=4.6",
     "types-PyYAML>=6.0",
     "pyyaml>=6.0",
+    "msgspec>=0.19",
+    "uvloop>=0.21",
 ]

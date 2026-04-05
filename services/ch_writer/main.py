@@ -1,12 +1,17 @@
-"""ch-writer: Kafka consumer -> ClickHouse batch writer.
+"""ch-writer: Kafka consumer → ClickHouse batch writer.
 
 Consumes from: reviews.validated.v1
 Writes to: ClickHouse {schema}.raw_reviews tables
 
-Ported from: ReviewsExporter.process_batch (insert section)
+Migration from old ch-writer:
+  - orjson → msgspec.json for Kafka de/serialization
+  - WriterConfig dict → msgspec.Struct
+  - Added asyncio.Lock for flush safety (timer vs consume loop race)
+  - uvloop entrypoint
+  - run_in_executor kept for clickhouse-connect (sync library, justified: >1s per INSERT)
 
-Key differences from pg-writer:
-  - Much larger batch sizes (50k+ rows) to avoid ClickHouse 'Too many parts'
+Key design decisions:
+  - Large batch sizes (50K+ rows) to avoid ClickHouse 'Too many parts' error
   - Groups by target database (source_33, source_47, etc.)
   - Uses max_partitions_per_insert_block=10000 setting (from original)
   - Dedup already done by review-exporter (Redis SADD), no ON CONFLICT needed
@@ -18,18 +23,12 @@ import signal
 import sys
 import time
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any
 
-import orjson
+import msgspec
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from loguru import logger
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    Counter,
-    Gauge,
-    Histogram,
-    generate_latest,
-)
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 # Column order for raw_reviews table (must match ClickHouse schema)
 COLUMN_NAMES = [
@@ -55,8 +54,27 @@ COLUMN_NAMES = [
 
 
 # ---------------------------------------------------------------------------
+# msgspec JSON — module-level singletons
+# ---------------------------------------------------------------------------
+
+_encoder = msgspec.json.Encoder()
+_decoder = msgspec.json.Decoder()
+
+
+def json_encode(obj: Any) -> bytes:
+    """Encode to JSON bytes via msgspec (replaces orjson.dumps)."""
+    return _encoder.encode(obj)
+
+
+def json_decode(data: bytes) -> Any:
+    """Decode JSON bytes via msgspec (replaces orjson.loads)."""
+    return _decoder.decode(data)
+
+
+# ---------------------------------------------------------------------------
 # Logging setup (loguru)
 # ---------------------------------------------------------------------------
+
 
 def setup_logging(level: str = "INFO") -> None:
     """Configure loguru JSON logging to stdout for Promtail/Loki ingestion."""
@@ -70,29 +88,47 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — msgspec.Struct
 # ---------------------------------------------------------------------------
 
-class WriterConfig:
+
+class WriterConfig(msgspec.Struct, kw_only=True):
     """ch-writer runtime configuration from environment variables."""
 
-    def __init__(self) -> None:
-        self.kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "")
-        self.kafka_topic = os.environ.get("KAFKA_TOPIC", "reviews.validated.v1")
-        self.consumer_group = os.environ.get("KAFKA_CONSUMER_GROUP", "aragog-ch-writers")
-        self.ch_host = os.environ.get("CLICKHOUSE_HOST", "")
-        self.ch_port = int(os.environ.get("CLICKHOUSE_PORT", "8123"))
-        self.ch_user = os.environ.get("CLICKHOUSE_USER", "")
-        self.ch_password = os.environ.get("CLICKHOUSE_PASSWORD", "")
-        self.batch_size = int(os.environ.get("BATCH_SIZE", "50000"))
-        self.flush_interval = float(os.environ.get("FLUSH_INTERVAL_MS", "10000")) / 1000
-        self.health_port = int(os.environ.get("HEALTH_PORT", "8080"))
-        self.max_partitions = int(os.environ.get("CH_MAX_PARTITIONS", "10000"))
-        self.dlq_topic = os.environ.get("DLQ_TOPIC", "reviews.dlq.v1")
+    kafka_bootstrap: str = ""
+    kafka_topic: str = "reviews.validated.v1"
+    consumer_group: str = "aragog-ch-writers"
+    ch_host: str = ""
+    ch_port: int = 8123
+    ch_user: str = ""
+    ch_password: str = ""
+    batch_size: int = 50000
+    flush_interval: float = 10.0
+    health_port: int = 8080
+    max_partitions: int = 10000
+    dlq_topic: str = "reviews.dlq.v1"
+
+    @classmethod
+    def from_env(cls) -> "WriterConfig":
+        """Build from environment variables."""
+        return cls(
+            kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", ""),
+            kafka_topic=os.environ.get("KAFKA_TOPIC", "reviews.validated.v1"),
+            consumer_group=os.environ.get("KAFKA_CONSUMER_GROUP", "aragog-ch-writers"),
+            ch_host=os.environ.get("CLICKHOUSE_HOST", ""),
+            ch_port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+            ch_user=os.environ.get("CLICKHOUSE_USER", ""),
+            ch_password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+            batch_size=int(os.environ.get("BATCH_SIZE", "50000")),
+            flush_interval=float(os.environ.get("FLUSH_INTERVAL_MS", "10000")) / 1000,
+            health_port=int(os.environ.get("HEALTH_PORT", "8080")),
+            max_partitions=int(os.environ.get("CH_MAX_PARTITIONS", "10000")),
+            dlq_topic=os.environ.get("DLQ_TOPIC", "reviews.dlq.v1"),
+        )
 
 
 # ---------------------------------------------------------------------------
-# Metrics
+# Prometheus Metrics
 # ---------------------------------------------------------------------------
 
 records_written = Counter(
@@ -122,21 +158,26 @@ buffer_size_gauge = Gauge(
 # CH Writer
 # ---------------------------------------------------------------------------
 
+
 class ChWriter:
-    """Kafka consumer that accumulates large batches of reviews and bulk-inserts into ClickHouse.
+    """Kafka consumer that accumulates large batches of reviews and inserts into ClickHouse.
 
     Flow:
-      1. Consume from Kafka
+      1. Consume from Kafka (msgspec deserialization)
       2. Buffer records grouped by target database
       3. Flush when any database buffer >= batch_size OR flush_interval elapsed
-      4. INSERT into {database}.raw_reviews with column ordering
+      4. INSERT into {database}.raw_reviews via clickhouse-connect (sync, in executor)
       5. Commit Kafka offsets after successful insert
+
+    Note: clickhouse-connect is a sync library. run_in_executor is justified here
+    because each INSERT takes 1-60s for 50K-200K rows — well above the 1ms threshold.
     """
 
     def __init__(self, config: WriterConfig) -> None:
         self.config = config
         self._running = False
         self._ready = asyncio.Event()
+        self._flush_lock = asyncio.Lock()
 
         self._buffers: dict[str, list[list]] = defaultdict(list)
         self._total_buffered = 0
@@ -153,27 +194,30 @@ class ChWriter:
         loop.add_signal_handler(signal.SIGTERM, self._request_shutdown)
         loop.add_signal_handler(signal.SIGINT, self._request_shutdown)
 
-        logger.info(f"Starting Kafka consumer: topic={self.config.kafka_topic} group={self.config.consumer_group}")
+        # --- Kafka consumer (msgspec deserializer) ---
+        logger.info(f"Starting Kafka consumer: topic={self.config.kafka_topic}")
         self._consumer = AIOKafkaConsumer(
             self.config.kafka_topic,
             bootstrap_servers=self.config.kafka_bootstrap,
             group_id=self.config.consumer_group,
             enable_auto_commit=False,
             auto_offset_reset="earliest",
-            value_deserializer=lambda v: orjson.loads(v),
+            value_deserializer=json_decode,
             max_poll_records=self.config.batch_size,
         )
         await self._consumer.start()
         logger.info("Kafka consumer started")
 
+        # --- DLQ producer (msgspec serializer) ---
         self._dlq_producer = AIOKafkaProducer(
             bootstrap_servers=self.config.kafka_bootstrap,
-            value_serializer=lambda v: orjson.dumps(v),
+            value_serializer=json_encode,
         )
         await self._dlq_producer.start()
         logger.info(f"DLQ producer started, topic={self.config.dlq_topic}")
 
-        self._tasks.append(asyncio.create_task(self._run_health_server(), name="health-server"))
+        # --- Background tasks ---
+        self._tasks.append(asyncio.create_task(self._run_health_server(), name="health"))
         self._tasks.append(asyncio.create_task(self._flush_timer(), name="flush-timer"))
 
         self._running = True
@@ -187,6 +231,8 @@ class ChWriter:
 
     async def _consume_loop(self) -> None:
         """Main consumer loop."""
+        assert self._consumer is not None, "Kafka consumer not started"
+
         while self._running:
             try:
                 batch = await self._consumer.getmany(
@@ -195,12 +241,13 @@ class ChWriter:
                 )
                 for tp, messages in batch.items():
                     for msg in messages:
-                        self._buffer_message(msg.value)
+                        if msg.value is not None:
+                            self._buffer_message(msg.value)
 
                 buffer_size_gauge.labels(writer="ch").set(self._total_buffered)
 
-                for db, rows in self._buffers.items():
-                    if len(rows) >= self.config.batch_size:
+                for db in list(self._buffers.keys()):
+                    if len(self._buffers[db]) >= self.config.batch_size:
                         await self._flush_database(db)
 
             except asyncio.CancelledError:
@@ -209,8 +256,10 @@ class ChWriter:
                 logger.exception("Error in consume loop")
                 await asyncio.sleep(2)
 
-    def _buffer_message(self, msg: dict[str, Any]) -> None:
+    def _buffer_message(self, msg: Any) -> None:
         """Deserialize Kafka message and buffer as a row array."""
+        if not isinstance(msg, dict):
+            return
         database = msg.get("schema", "")
         review = msg.get("review")
 
@@ -231,18 +280,23 @@ class ChWriter:
                 await self._flush_all()
 
     async def _flush_database(self, database: str) -> None:
-        """Insert buffered rows into {database}.raw_reviews via clickhouse-connect."""
-        rows = self._buffers.get(database)
-        if not rows:
-            return
+        """Insert buffered rows into {database}.raw_reviews via clickhouse-connect.
 
-        to_insert = rows[:]
-        self._buffers[database] = []
-        self._total_buffered -= len(to_insert)
-        buffer_size_gauge.labels(writer="ch").set(max(self._total_buffered, 0))
+        Uses run_in_executor because clickhouse-connect is synchronous.
+        This is justified: each INSERT takes 1-60s for large batches.
+        """
+        async with self._flush_lock:
+            rows = self._buffers.get(database)
+            if not rows:
+                return
+
+            to_insert = rows[:]
+            self._buffers[database] = []
+            self._total_buffered -= len(to_insert)
+            buffer_size_gauge.labels(writer="ch").set(max(self._total_buffered, 0))
 
         t0 = time.monotonic()
-        logger.info(f"Flushing {len(to_insert)} rows to ClickHouse database '{database}'")
+        logger.info(f"Flushing {len(to_insert)} rows to ClickHouse '{database}'")
 
         try:
             client = self._get_ch_client(database)
@@ -355,9 +409,9 @@ class ChWriter:
 
     async def _run_health_server(self) -> None:
         """Run K8s probe and Prometheus metrics HTTP server."""
+        import uvicorn
         from fastapi import FastAPI
         from fastapi.responses import PlainTextResponse
-        import uvicorn
 
         app = FastAPI(docs_url=None, redoc_url=None)
 
@@ -378,24 +432,35 @@ class ChWriter:
                 media_type=CONTENT_TYPE_LATEST,
             )
 
-        server = uvicorn.Server(uvicorn.Config(
-            app, host="0.0.0.0", port=self.config.health_port,
-            log_level="warning", access_log=False,
-        ))
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=self.config.health_port,
+                log_level="warning",
+                access_log=False,
+            )
+        )
         await server.serve()
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint
+# Entrypoint — uvloop
 # ---------------------------------------------------------------------------
+
 
 async def main() -> None:
     """Start the ch-writer service."""
     setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
-    config = WriterConfig()
+    config = WriterConfig.from_env()
     writer = ChWriter(config)
     await writer.start()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        import uvloop
+
+        uvloop.run(main())
+    except ImportError:
+        asyncio.run(main())

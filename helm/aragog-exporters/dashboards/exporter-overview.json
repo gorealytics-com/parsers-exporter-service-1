@@ -5,29 +5,50 @@
   "graphTooltip": 1,
   "id": null,
   "links": [],
+  "tags": ["aragog", "exporters"],
+  "title": "Aragog Exporters Overview",
+  "uid": "aragog-exporters",
+  "templating": {
+    "list": [
+      {
+        "name": "exporter_type",
+        "type": "custom",
+        "current": {"text": "All", "value": "$__all"},
+        "options": [
+          {"text": "All", "value": "$__all"},
+          {"text": "map", "value": "map"},
+          {"text": "delivery", "value": "delivery"},
+          {"text": "sitemap", "value": "sitemap"},
+          {"text": "reviews", "value": "reviews"}
+        ],
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
   "panels": [
     {
-      "title": "Items Produced/sec",
+      "title": "Items Produced/sec by Exporter Type",
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-      "targets": [{"expr": "sum(rate(aragog_exporter_items_produced_total[5m])) by (exporter)", "legendFormat": "{{exporter}}"}],
+      "targets": [{"expr": "sum(rate(aragog_exporter_items_produced_total{type=~\"$exporter_type\"}[5m])) by (exporter, type)", "legendFormat": "{{type}}/{{exporter}}"}],
       "fieldConfig": {"defaults": {"unit": "ops"}}
     },
     {
       "title": "Items Skipped/sec by Reason",
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-      "targets": [{"expr": "sum(rate(aragog_exporter_items_skipped_total[5m])) by (exporter, reason)", "legendFormat": "{{exporter}} - {{reason}}"}],
+      "targets": [{"expr": "sum(rate(aragog_exporter_items_skipped_total{type=~\"$exporter_type\"}[5m])) by (reason)", "legendFormat": "{{reason}}"}],
       "fieldConfig": {"defaults": {"unit": "ops"}}
     },
     {
-      "title": "Batch Duration (p50/p95/p99)",
+      "title": "Batch Duration p50/p95/p99",
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum(rate(aragog_exporter_batch_duration_seconds_bucket[5m])) by (le, exporter))", "legendFormat": "p50 {{exporter}}"},
-        {"expr": "histogram_quantile(0.95, sum(rate(aragog_exporter_batch_duration_seconds_bucket[5m])) by (le, exporter))", "legendFormat": "p95 {{exporter}}"},
-        {"expr": "histogram_quantile(0.99, sum(rate(aragog_exporter_batch_duration_seconds_bucket[5m])) by (le, exporter))", "legendFormat": "p99 {{exporter}}"}
+        {"expr": "histogram_quantile(0.50, sum(rate(aragog_exporter_batch_duration_seconds_bucket{exporter=~\".+\"}[5m])) by (le, exporter))", "legendFormat": "p50 {{exporter}}"},
+        {"expr": "histogram_quantile(0.95, sum(rate(aragog_exporter_batch_duration_seconds_bucket{exporter=~\".+\"}[5m])) by (le, exporter))", "legendFormat": "p95 {{exporter}}"},
+        {"expr": "histogram_quantile(0.99, sum(rate(aragog_exporter_batch_duration_seconds_bucket{exporter=~\".+\"}[5m])) by (le, exporter))", "legendFormat": "p99 {{exporter}}"}
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
@@ -35,21 +56,39 @@
       "title": "Redis Queue Depth",
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-      "targets": [{"expr": "aragog_exporter_redis_queue_length", "legendFormat": "{{exporter}} - {{queue}}"}],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "targets": [{"expr": "aragog_exporter_redis_queue_length", "legendFormat": "{{queue}}"}],
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "options": {"tooltip": {"mode": "multi"}}
     },
     {
       "title": "Kafka Produce Errors",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
-      "targets": [{"expr": "sum(rate(aragog_exporter_kafka_produce_errors_total[5m])) by (exporter)", "legendFormat": "{{exporter}}"}],
-      "fieldConfig": {"defaults": {"unit": "ops"}}
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 16},
+      "targets": [{"expr": "sum(increase(aragog_exporter_kafka_produce_errors_total[1h]))", "legendFormat": "errors/hr"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "red"}]}}}
+    },
+    {
+      "title": "Validation Errors",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 16},
+      "targets": [{"expr": "sum(increase(aragog_exporter_items_errored_total[1h]))", "legendFormat": "errors/hr"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 10, "color": "yellow"}, {"value": 100, "color": "red"}]}}}
+    },
+    {
+      "title": "Total Produced (24h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 16},
+      "targets": [{"expr": "sum(increase(aragog_exporter_items_produced_total[24h]))", "legendFormat": "total"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "title": "Active Exporter Pods",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 16},
+      "targets": [{"expr": "count(up{job=~\".*exporter.*\"} == 1)", "legendFormat": "pods"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
     }
   ],
-  "schemaVersion": 39,
-  "tags": ["aragog", "exporters"],
-  "templating": {"list": []},
-  "time": {"from": "now-1h", "to": "now"},
-  "title": "Aragog — Exporter Overview",
-  "uid": "aragog-exporter-overview"
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s"
 }

@@ -1,17 +1,24 @@
 # =============================================================================
 # Multi-stage Dockerfile for Aragog DB Writers
-# Shared by: pg-writer, ch-writer
-# Build arg SERVICE_NAME selects the concrete writer
-# Uses UV for dependency management
+# =============================================================================
+# Builds: pg-writer, ch-writer
+# Build arg SERVICE_NAME selects the concrete writer.
+#
+# pg-writer: Kafka → asyncpg COPY upsert → PostgreSQL (via PgBouncer)
+# ch-writer: Kafka → clickhouse-connect INSERT → ClickHouse
+#
+# Serialization: msgspec (replaces orjson)
+# Event loop: uvloop
+# Vault: Startup command sources /vault/secrets/env before exec python
 # =============================================================================
 
 # --- Stage 1: Dependencies ---
 FROM python:3.11-slim AS deps
 
-RUN pip install uv
+RUN pip install --no-cache-dir uv
 WORKDIR /build
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml ./
 
 ARG SERVICE_NAME=pg-writer
 COPY services/${SERVICE_NAME}/pyproject.toml services/${SERVICE_NAME}/
@@ -26,7 +33,8 @@ RUN uv pip install --system --no-cache \
 # --- Stage 2: Runtime ---
 FROM python:3.11-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends bash \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r aragog && useradd -r -g aragog -d /app -s /bin/bash aragog
 
@@ -34,8 +42,10 @@ WORKDIR /app
 
 COPY --from=deps /usr/local/lib/python3.11/site-packages/ /usr/local/lib/python3.11/site-packages/
 
+# Copy shared libs
 COPY libs/ /app/libs/
 
+# Copy writer service
 ARG SERVICE_NAME=pg-writer
 COPY services/${SERVICE_NAME}/ /app/service/
 
@@ -47,7 +57,9 @@ EXPOSE 8080
 
 USER aragog
 
-HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
 
+# Default CMD — in K8s, overridden by Vault startup:
+#   source /vault/secrets/env && exec python -m service.main
 CMD ["python", "-m", "service.main"]

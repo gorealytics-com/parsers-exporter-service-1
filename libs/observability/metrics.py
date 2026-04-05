@@ -9,8 +9,8 @@ import sys
 
 from loguru import logger
 
-
 # --- Structured JSON Logger (loguru) ---
+
 
 def setup_logging(level: str = "INFO", component: str = "unknown") -> None:
     """Configure loguru JSON logging to stdout for Promtail/Loki ingestion.
@@ -34,6 +34,7 @@ def setup_logging(level: str = "INFO", component: str = "unknown") -> None:
 
 
 # --- Prometheus Metrics ---
+
 
 def create_exporter_metrics(prefix: str = "aragog_exporter") -> dict:
     """Create standard Prometheus metrics for exporters.

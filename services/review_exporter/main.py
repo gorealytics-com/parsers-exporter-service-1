@@ -5,6 +5,8 @@ Keeps:   SADD pipeline dedup, date validation (>=2020), review_middleware,
          dupefilter_prefill_loader on startup
 Removes: clickhouse-connect insert (moved to ch-writer)
 
+Serialization: msgspec.json for decode (Redis bytes) and encode (Kafka).
+
 Kafka message schema::
 
     {
@@ -24,19 +26,19 @@ import datetime
 import json
 import os
 import sys
-from typing import Any, Optional
+from typing import Any
 
-import orjson
 import redis.asyncio as aioredis
 from dateutil import parser as dateparser
 from loguru import logger
 
 sys.path.insert(0, "/app")
-from exporter_base.base import (
+from exporter_base.base import (  # TODO Import "exporter_base.base" could not be resolved
     BaseValidator,
     ExporterConfig,
     ExporterMetrics,
     ExporterRunner,
+    json_decode,
     setup_logging,
 )
 
@@ -46,10 +48,6 @@ MIN_REVIEW_YEAR = 2020
 # Japanese date format used by some sources (Baidu, Yahoo Japan)
 JP_DATE_FORMAT = "%Y年%m月%d日"
 
-
-# ---------------------------------------------------------------------------
-# Review Validator
-# ---------------------------------------------------------------------------
 
 class ReviewValidator(BaseValidator):
     """Stateless review validator with Redis-based deduplication.
@@ -65,8 +63,6 @@ class ReviewValidator(BaseValidator):
         super().__init__(config)
         self.add_middleware(self._review_middleware)
 
-    # ---- BaseValidator interface ----------------------------------------
-
     async def validate_batch(
         self,
         raw_items: list[bytes],
@@ -78,13 +74,14 @@ class ReviewValidator(BaseValidator):
         batch_timestamp = now
         batch_id = int(now.timestamp())
 
-        # --- Phase 1: Deserialize + middleware ---
+        # --- Phase 1: Deserialize via msgspec + middleware ---
         parsed: list[tuple[bytes, dict[str, Any]]] = []
         review_ids: list[str] = []
 
         for raw in raw_items:
             try:
-                item = orjson.loads(raw)
+                # msgspec.json.decode replaces orjson.loads
+                item = json_decode(raw)
                 item = self.apply_middlewares(item)
                 parsed.append((raw, item))
                 review_ids.append(item.get("source_review_id", ""))
@@ -115,11 +112,13 @@ class ReviewValidator(BaseValidator):
                     metrics.inc_skipped("date_filter")
                     continue
 
-                validated.append({
-                    "schema": self.config.schema,
-                    "source_name": self.config.source_name,
-                    "review": review_data,
-                })
+                validated.append(
+                    {
+                        "schema": self.config.schema,
+                        "source_name": self.config.source_name,
+                        "review": review_data,
+                    }
+                )
             except Exception:
                 logger.exception("Review validation error, skipping")
                 metrics.inc_errored()
@@ -133,7 +132,7 @@ class ReviewValidator(BaseValidator):
 
         return validated
 
-    def partition_key(self, item: dict[str, Any]) -> Optional[bytes]:
+    def partition_key(self, item: dict[str, Any]) -> bytes | None:
         """Partition by source_review_id for even distribution."""
         rid = item.get("review", {}).get("source_review_id", "")
         return rid.encode("utf-8") if rid else None
@@ -143,6 +142,7 @@ class ReviewValidator(BaseValidator):
 
         Ported from dupefilter_prefill_loader.fill_reviews_dupefilter_by_source.
         Runs once at pod startup. Uses sync clickhouse-connect (blocking but one-time).
+        This is the ONE place where run_in_executor is justified (>1s operation).
         """
         if not self.config.dupefilter_key or not self.config.schema:
             logger.info("No dupefilter configured, skipping prefill")
@@ -153,10 +153,7 @@ class ReviewValidator(BaseValidator):
             logger.info("No CLICKHOUSE_HOST set, skipping dupefilter prefill")
             return
 
-        logger.info(
-            f"Starting dupefilter prefill: schema={self.config.schema} "
-            f"key={self.config.dupefilter_key}"
-        )
+        logger.info(f"Starting dupefilter prefill: schema={self.config.schema} key={self.config.dupefilter_key}")
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._sync_prefill_dupefilter)
@@ -165,8 +162,8 @@ class ReviewValidator(BaseValidator):
     def _sync_prefill_dupefilter(self) -> None:
         """Load existing source_review_ids from ClickHouse into the Redis dedup set.
 
-        Ported from: dupefilter_prefill_loader.fill_reviews_dupefilter_by_source.
-        Sync blocking function run in a thread executor.
+        Sync blocking function run in thread executor (justified: one-time startup,
+        may take 10-60s for millions of review IDs).
         """
         import clickhouse_connect
         import redis as sync_redis
@@ -184,26 +181,20 @@ class ReviewValidator(BaseValidator):
         redis_conn = sync_redis.from_url(self.config.redis_url)
 
         try:
-            total_in_ch = ch_client.query(
-                f"SELECT count(source_review_id) FROM {source_id}.raw_reviews"
-            ).result_rows[0][0]
+            total_in_ch = ch_client.query(f"SELECT count(source_review_id) FROM {source_id}.raw_reviews").result_rows[
+                0
+            ][0]
 
             existing_in_redis = redis_conn.scard(dupefilter_key)
 
             if existing_in_redis >= total_in_ch and total_in_ch > 0:
-                logger.info(
-                    f"Dupefilter already filled: redis={existing_in_redis} ch={total_in_ch}"
-                )
+                logger.info(f"Dupefilter already filled: redis={existing_in_redis} ch={total_in_ch}")
                 return
 
-            logger.info(
-                f"Prefilling dupefilter: ch={total_in_ch} redis={existing_in_redis}, loading delta..."
-            )
+            logger.info(f"Prefilling dupefilter: ch={total_in_ch} redis={existing_in_redis}, loading delta...")
 
             processed = 0
-            with ch_client.query_column_block_stream(
-                f"SELECT source_review_id FROM {source_id}.raw_reviews"
-            ) as stream:
+            with ch_client.query_column_block_stream(f"SELECT source_review_id FROM {source_id}.raw_reviews") as stream:
                 for columns in stream:
                     values = columns[0]
                     pipe = redis_conn.pipeline(transaction=False)
@@ -225,7 +216,9 @@ class ReviewValidator(BaseValidator):
     # ---- Dedup pipeline (ported from reviews.py) -----------------------
 
     async def _dedup_pipeline(
-        self, redis: aioredis.Redis, review_ids: list[str],
+        self,
+        redis: aioredis.Redis,
+        review_ids: list[str],
     ) -> list[bool]:
         """Batch dedup via Redis SADD pipeline.
 
@@ -251,8 +244,7 @@ class ReviewValidator(BaseValidator):
     ) -> dict[str, Any] | None:
         """Validate a single review item.
 
-        Ported from ReviewsExporter._process_item:
-        parse and validate review_date (>= 2020), Japanese date format fallback,
+        Parse and validate review_date (>= 2020), Japanese date format fallback,
         set defaults for url/review_language, add batch metadata.
         """
         raw_date = item.get("review_date")
@@ -287,8 +279,7 @@ class ReviewValidator(BaseValidator):
     def _review_middleware(self, item: dict[str, Any]) -> dict[str, Any]:
         """Normalize review fields.
 
-        Ported from ReviewsExporter._review_middleware:
-        review_rating -> float, additional_info -> JSON string,
+        review_rating → float, additional_info → JSON string,
         default source from config.
         """
         try:
@@ -307,8 +298,9 @@ class ReviewValidator(BaseValidator):
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint
+# Entrypoint — uvloop for 2-4x I/O improvement
 # ---------------------------------------------------------------------------
+
 
 async def main() -> None:
     """Start the review-exporter service."""
@@ -320,4 +312,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        import uvloop
+
+        uvloop.run(main())
+    except ImportError:
+        asyncio.run(main())

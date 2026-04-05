@@ -1,9 +1,11 @@
-# ArgoCD: https://argocd.dev.rea/applications
+# ArgoCD Application: https://argocd.dev.rea/applications
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: aragog-exporters-dev
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   project: default
   source:
@@ -23,3 +25,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true

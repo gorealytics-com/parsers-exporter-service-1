@@ -1,27 +1,22 @@
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.8
+    rev: v0.15.9
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-
   - repo: local
     hooks:
       - id: no-multiprocessing
         name: Ban multiprocessing/dask imports
-        entry: python -c "import sys; [sys.exit(1) for f in sys.argv[1:] if any(x in open(f).read() for x in ['import multiprocessing', 'from dask', 'import dask'])]"
+        entry: .venv/bin/python -c "import sys; [sys.exit(1) for f in sys.argv[1:] if any(x in open(f).read() for x in ['import multiprocessing', 'from dask', 'import dask'])]"
         language: system
         types: [python]
 
       - id: no-print
         name: Ban print() statements (use loguru)
-        entry: python -c "import sys,re; [sys.exit(1) for f in sys.argv[1:] if re.search(r'^\s*print\(', open(f).read(), re.M)]"
+        entry: .venv/bin/python -c "import sys,re; [sys.exit(1) for f in sys.argv[1:] if re.search(r'^\s*print\(', open(f).read(), re.M)]"
         language: system
         types: [python]

@@ -1,24 +1,38 @@
 # =============================================================================
 # Multi-stage Dockerfile for Aragog Exporters
-# Shared by: org-exporter, review-exporter
-# Build arg SERVICE_NAME selects the concrete service
-# Uses UV for dependency management
+# =============================================================================
+# Builds: map-exporter, delivery-exporter, sitemap-exporter, review-exporter
+# Build arg SERVICE_NAME selects the entrypoint service.
+#
+# All service code is copied into every image because delivery-exporter and
+# sitemap-exporter import OrgValidator from org-exporter. The code is ~100KB
+# total — negligible vs the ~200MB Python runtime.
+#
+# Serialization: msgspec (replaces orjson)
+# Event loop: uvloop (Linux only, 2-4x I/O improvement)
+# Vault: Startup command sources /vault/secrets/env before exec python
 # =============================================================================
 
 # --- Stage 1: Dependencies ---
 FROM python:3.11-slim AS deps
 
-RUN pip install uv
+RUN pip install --no-cache-dir uv
 WORKDIR /build
 
-COPY pyproject.toml uv.lock ./
-COPY services/exporter-base/pyproject.toml services/exporter-base/
+# Copy dependency manifests first (Docker layer caching)
+COPY pyproject.toml ./
 
-ARG SERVICE_NAME=org-exporter
-COPY services/${SERVICE_NAME}/pyproject.toml services/${SERVICE_NAME}/
+# Copy ALL service and lib pyproject.toml for dependency resolution
+COPY services/exporter-base/pyproject.toml services/exporter-base/
+COPY services/org-exporter/pyproject.toml services/org-exporter/
+COPY services/delivery-exporter/pyproject.toml services/delivery-exporter/
+COPY services/sitemap-exporter/pyproject.toml services/sitemap-exporter/
+COPY services/review-exporter/pyproject.toml services/review-exporter/
 COPY libs/common/pyproject.toml libs/common/
 COPY libs/observability/pyproject.toml libs/observability/
 
+# Install all exporter deps in one layer (shared across all exporter images)
+ARG SERVICE_NAME=org-exporter
 RUN uv pip install --system --no-cache \
     -e services/exporter-base \
     -e services/${SERVICE_NAME} \
@@ -28,37 +42,50 @@ RUN uv pip install --system --no-cache \
 # --- Stage 2: Runtime ---
 FROM python:3.11-slim AS runtime
 
-# Security: non-root user + bash for Vault agent source command
-RUN apt-get update && apt-get install -y --no-install-recommends bash \
+# bash required for Vault agent `source /vault/secrets/env` command
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r aragog && useradd -r -g aragog -d /app -s /bin/bash aragog
 
 WORKDIR /app
 
-# Copy installed packages from deps stage
+# Copy installed Python packages from deps stage
 COPY --from=deps /usr/local/lib/python3.11/site-packages/ /usr/local/lib/python3.11/site-packages/
+
+# Copy ALL service code (for cross-imports: delivery/sitemap → org_exporter)
+COPY services/exporter-base/ /app/exporter_base/
+COPY services/org-exporter/ /app/org_exporter/
+COPY services/delivery-exporter/ /app/delivery_exporter/
+COPY services/sitemap-exporter/ /app/sitemap_exporter/
+COPY services/review-exporter/ /app/review_exporter/
 
 # Copy shared libs
 COPY libs/ /app/libs/
 
-# Copy base exporter
-COPY services/exporter-base/ /app/exporter_base/
-
-# Copy concrete service
-ARG SERVICE_NAME=org-exporter
-COPY services/${SERVICE_NAME}/ /app/service/
-
 # Metadata
+ARG SERVICE_NAME=org-exporter
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    SERVICE_MODULE=org_exporter
+
+# Map SERVICE_NAME build arg to Python module path
+# org-exporter      → org_exporter.main
+# delivery-exporter → delivery_exporter.main
+# sitemap-exporter  → sitemap_exporter.main
+# review-exporter   → review_exporter.main
+RUN MODULE=$(echo "${SERVICE_NAME}" | sed 's/-/_/g') \
+    && echo "SERVICE_MODULE=${MODULE}" >> /etc/environment \
+    && echo "${MODULE}" > /app/.service_module
 
 EXPOSE 8080
 
 USER aragog
 
-HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:8080/health || exit 1
 
-# Default CMD — overridden by Vault startup command in K8s
-CMD ["python", "-m", "service.main"]
+# Default CMD — in K8s, overridden by Vault startup:
+#   source /vault/secrets/env && exec python -m ${module}.main
+CMD ["sh", "-c", "python -m $(cat /app/.service_module).main"]

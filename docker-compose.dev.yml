@@ -1,28 +1,25 @@
 # =============================================================================
-# Local Development Environment
+# Local Development Environment — Full EDA Pipeline
 # =============================================================================
-# Provides all infrastructure for local testing of the EDA pipeline:
-#   Redis → Exporter → Kafka → Writer → PostgreSQL/ClickHouse
+# Infrastructure: Redis, PostgreSQL, PgBouncer, ClickHouse, Kafka, Kafka UI
+# Application:    4 exporters (map, delivery, sitemap, review) + 2 writers (pg, ch)
 #
 # Usage:
-#   docker compose -f docker-compose.dev.yml up -d
-#   docker compose -f docker-compose.dev.yml logs -f
-#   docker compose -f docker-compose.dev.yml down -v   # full reset
+#   docker compose -f docker-compose.dev.yml up -d              # infra only
+#   docker compose -f docker-compose.dev.yml --profile app up -d # infra + apps
 #
-# Ports (offset to avoid conflicts with production):
-#   Redis:      16379
-#   PostgreSQL: 15432
-#   PgBouncer:  16432
-#   ClickHouse: 18123
-#   Kafka:      19092
-#   Kafka UI:   18080
+# Ports (offset to avoid conflicts):
+#   Redis:      16379    PostgreSQL: 15432    PgBouncer: 16432
+#   ClickHouse: 18123    Kafka:      19092    Kafka UI:  18080
 # =============================================================================
 
 name: aragog-dev
 
 services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════════
 
-  # --- Redis (input queues) ---
   redis:
     image: redis:7-alpine
     container_name: dev-redis
@@ -31,7 +28,7 @@ services:
       --appendonly no
       --save ""
       --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     ports:
       - "127.0.0.1:16379:6379"
     healthcheck:
@@ -42,7 +39,6 @@ services:
     networks:
       - dev
 
-  # --- PostgreSQL ---
   postgres:
     image: postgres:16-alpine
     container_name: dev-postgres
@@ -63,29 +59,24 @@ services:
     networks:
       - dev
 
-  # --- PgBouncer (connection pooler) ---
   pgbouncer:
-    image: bitnami/pgbouncer:1.22.0
+    image: edoburu/pgbouncer:latest
     container_name: dev-pgbouncer
     environment:
-      POSTGRESQL_HOST: postgres
-      POSTGRESQL_PORT: "5432"
-      POSTGRESQL_USERNAME: dev_user
-      POSTGRESQL_PASSWORD: dev_pass
-      POSTGRESQL_DATABASE: aragog_dev
-      PGBOUNCER_POOL_MODE: transaction
-      PGBOUNCER_MAX_CLIENT_CONN: "100"
-      PGBOUNCER_DEFAULT_POOL_SIZE: "10"
-      PGBOUNCER_MAX_DB_CONNECTIONS: "20"
+      DATABASE_URL: postgres://dev_user:dev_pass@postgres:5432/aragog_dev
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "100"
+      DEFAULT_POOL_SIZE: "10"
+      MAX_DB_CONNECTIONS: "20"
+      AUTH_TYPE: plain
     ports:
-      - "127.0.0.1:16432:6432"
+      - "127.0.0.1:16432:5432"
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - dev
 
-  # --- ClickHouse ---
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
     container_name: dev-clickhouse
@@ -103,28 +94,30 @@ services:
     networks:
       - dev
 
-  # --- Kafka (single-node for dev) ---
   kafka:
-    image: bitnami/kafka:3.7
+    image: apache/kafka:latest
     container_name: dev-kafka
     environment:
-      # KRaft mode (no ZooKeeper)
-      KAFKA_CFG_NODE_ID: "0"
-      KAFKA_CFG_PROCESS_ROLES: controller,broker
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19092
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:19092
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
-      KAFKA_CFG_NUM_PARTITIONS: "12"
-      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
-      KAFKA_CFG_LOG_RETENTION_HOURS: "168"  # 7 days
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: "6"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "1"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_LOG_RETENTION_HOURS: "168"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
     ports:
       - "127.0.0.1:19092:19092"
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -132,9 +125,8 @@ services:
     networks:
       - dev
 
-  # --- Kafka topic init (one-shot) ---
   kafka-init:
-    image: bitnami/kafka:3.7
+    image: apache/kafka:latest
     container_name: dev-kafka-init
     depends_on:
       kafka:
@@ -143,20 +135,19 @@ services:
     command:
       - |
         echo "Creating Kafka topics..."
-        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
-          --topic orgs.validated.v1 --partitions 12 --replication-factor 1
-        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
-          --topic reviews.validated.v1 --partitions 12 --replication-factor 1
-        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic orgs.validated.v1 --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic reviews.validated.v1 --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
           --topic orgs.dlq.v1 --partitions 3 --replication-factor 1
-        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
           --topic reviews.dlq.v1 --partitions 3 --replication-factor 1
         echo "Topics created:"
-        kafka-topics.sh --bootstrap-server kafka:9092 --list
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
     networks:
       - dev
 
-  # --- Kafka UI (optional, for debugging) ---
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: dev-kafka-ui
@@ -171,8 +162,165 @@ services:
     networks:
       - dev
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # APPLICATION SERVICES (profile: app)
+  # Run with: docker compose --profile app up -d
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # --- Exporters ---
+
+  map-exporter:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.exporter
+      args:
+        SERVICE_NAME: org-exporter
+    container_name: dev-map-exporter
+    environment:
+      EXPORTER_NAME: bing_map_search
+      EXPORTER_TYPE: map
+      SOURCE_NAME: "Bing Org Update"
+      SCHEMA: source_42
+      REDIS_URL: redis://redis:6379/0
+      REDIS_QUEUE: "bing_map_search:items"
+      BATCH_SIZE: "100"
+      CHECK_INTERVAL: "5"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: orgs.validated.v1
+      LOG_LEVEL: DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - dev
+
+  delivery-exporter:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.exporter
+      args:
+        SERVICE_NAME: delivery-exporter
+    container_name: dev-delivery-exporter
+    environment:
+      EXPORTER_NAME: ubereats_delivery
+      EXPORTER_TYPE: delivery
+      SOURCE_NAME: "UberEats Update"
+      SCHEMA: source_27
+      REDIS_URL: redis://redis:6379/0
+      REDIS_QUEUE: "delivery:source_27:items"
+      BATCH_SIZE: "100"
+      CHECK_INTERVAL: "5"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: orgs.validated.v1
+      LOG_LEVEL: DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - dev
+
+  review-exporter:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.exporter
+      args:
+        SERVICE_NAME: review-exporter
+    container_name: dev-review-exporter
+    environment:
+      EXPORTER_NAME: tripadvisor_reviews
+      EXPORTER_TYPE: reviews
+      SOURCE_NAME: "Tripadvisor"
+      SCHEMA: source_33
+      REDIS_URL: redis://redis:6379/0
+      REDIS_QUEUE: "tripadvisor_reviews:items"
+      DUPEFILTER_KEY: "tripadvisor:reviews_dupefilter"
+      BATCH_SIZE: "100"
+      CHECK_INTERVAL: "5"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: reviews.validated.v1
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      LOG_LEVEL: DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - dev
+
+  # --- Writers ---
+
+  pg-writer:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.writer
+      args:
+        SERVICE_NAME: pg-writer
+    container_name: dev-pg-writer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: orgs.validated.v1
+      KAFKA_CONSUMER_GROUP: aragog-pg-writers
+      PG_URI: postgresql://dev_user:dev_pass@pgbouncer:5432/aragog_dev
+      BATCH_SIZE: "100"
+      FLUSH_INTERVAL_MS: "3000"
+      INSERT_CHUNK_SIZE: "1000"
+      DLQ_TOPIC: orgs.dlq.v1
+      PG_POOL_MIN: "1"
+      PG_POOL_MAX: "5"
+      LOG_LEVEL: DEBUG
+    depends_on:
+      pgbouncer:
+        condition: service_started
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - dev
+
+  ch-writer:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.writer
+      args:
+        SERVICE_NAME: ch-writer
+    container_name: dev-ch-writer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: reviews.validated.v1
+      KAFKA_CONSUMER_GROUP: aragog-ch-writers
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      BATCH_SIZE: "100"
+      FLUSH_INTERVAL_MS: "5000"
+      DLQ_TOPIC: reviews.dlq.v1
+      LOG_LEVEL: DEBUG
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    networks:
+      - dev
+
   # --- Data Seeder (one-shot, pushes test data to Redis) ---
   data-seeder:
+    profiles: ["app"]
     build:
       context: .
       dockerfile: docker/Dockerfile.seeder

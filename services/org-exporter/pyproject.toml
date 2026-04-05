@@ -1,9 +1,0 @@
-[project]
-name = "org-exporter"
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = [
-    "exporter-base",
-    "orjson>=3.9",
-    "loguru>=0.7",
-]

@@ -48,11 +48,11 @@ spec:
       {{- end }}
       containers:
         - name: exporter
-          image: "{{ $.Values.images.exporter.repository }}:{{ $.Values.images.exporter.tag }}"
+          image: "{{ $cfg.image | default $.Values.images.exporter.repository }}:{{ $.Values.images.exporter.tag }}"
           imagePullPolicy: {{ $.Values.images.exporter.pullPolicy }}
           # --- Vault: source secrets before starting Python ---
           command: ["/bin/bash"]
-          args: ["-c", "source /vault/secrets/env && exec python -m service.main"]
+          args: ["-c", "source /vault/secrets/env && exec python -m $(cat /app/.service_module).main"]
           ports:
             - name: metrics
               containerPort: {{ $defaults.metrics.port }}

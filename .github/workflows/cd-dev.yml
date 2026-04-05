@@ -22,9 +22,15 @@ jobs:
     strategy:
       matrix:
         include:
-          - service: org-exporter
+          - service: map-exporter
             dockerfile: docker/Dockerfile.exporter
             build_arg: SERVICE_NAME=org-exporter
+          - service: delivery-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=delivery-exporter
+          - service: sitemap-exporter
+            dockerfile: docker/Dockerfile.exporter
+            build_arg: SERVICE_NAME=sitemap-exporter
           - service: review-exporter
             dockerfile: docker/Dockerfile.exporter
             build_arg: SERVICE_NAME=review-exporter

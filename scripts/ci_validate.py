@@ -15,7 +15,9 @@ Verifies:
 """
 
 import sys
+
 import yaml
+from loguru import logger
 
 VALUES_PATH = "helm/aragog-exporters/values.yaml"
 
@@ -24,7 +26,7 @@ VALID_TYPES = {"organization", "reviews"}
 
 
 def load_values() -> dict:
-    with open(VALUES_PATH, "r", encoding="utf-8") as f:
+    with open(VALUES_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -64,9 +66,7 @@ def main() -> int:
         q = cfg.get("queue")
         if q:
             if q in seen_queues:
-                errors.append(
-                    f"{prefix}.queue: duplicate '{q}' (also in '{seen_queues[q]}')"
-                )
+                errors.append(f"{prefix}.queue: duplicate '{q}' (also in '{seen_queues[q]}')")
             seen_queues[q] = name
 
         # batchSize must be positive
@@ -106,15 +106,12 @@ def main() -> int:
     return 1 if errors else 0
 
 
-def _report(errors):
+def _report(errors) -> None:
     if errors:
-        print(f"\nValues validation FAILED with {len(errors)} error(s):\n")
-        for e in errors:
-            print(f"  * {e}")
-        print()
+        logger.warning(f"\nValues validation FAILED with {len(errors)} error(s):\n")
     else:
         count_exp = len(load_values().get("exporters", {}))
-        print(f"\nValues validation PASSED — {count_exp} exporters, no duplicates.\n")
+        logger.info(f"\nValues validation PASSED — {count_exp} exporters, no duplicates.\n")
 
 
 if __name__ == "__main__":

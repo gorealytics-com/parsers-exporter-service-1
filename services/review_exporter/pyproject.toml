@@ -4,8 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "exporter-base",
-    "orjson>=3.9",
     "python-dateutil>=2.8",
     "clickhouse-connect>=0.7",
-    "loguru>=0.7",
 ]
+
+[tool.uv.sources]
+exporter-base = { workspace = true }

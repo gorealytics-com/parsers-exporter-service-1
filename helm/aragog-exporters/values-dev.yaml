@@ -1,79 +1,66 @@
 # =============================================================================
-# Dev Environment Overrides
+# aragog-exporters — DEV environment overrides
 # =============================================================================
-vault:
-  role: "aragog-dev-read"
-  secretPath: "org/data/dev/aragog_exporters"
+# ArgoCD: https://argocd.dev.rea/applications
+# Grafana: https://grafana.dev.k8s.rea/login
+# Vault: https://vault.rea:8200/ui → org/data/dev/aragog_exporters
+# =============================================================================
 
 global:
   namespace: aragog-dev
 
+vault:
+  role: "aragog-dev-read"
+  secretPath: "org/data/dev/aragog_exporters"
+
 images:
   exporter:
-    repository: ghcr.io/gorealytics-com/aragog-exporters/exporter
+    tag: "develop"
+    pullPolicy: Always
   pgWriter:
-    repository: ghcr.io/gorealytics-com/aragog-exporters/pg-writer
+    tag: "develop"
+    pullPolicy: Always
   chWriter:
-    repository: ghcr.io/gorealytics-com/aragog-exporters/ch-writer
+    tag: "develop"
+    pullPolicy: Always
 
+# Dev: smaller resources, fewer replicas
 exporterDefaults:
   replicas: 1
+  batchSize: 1000
+  checkIntervalSeconds: 10
   resources:
     requests:
       cpu: "50m"
       memory: "128Mi"
     limits:
-      cpu: "250m"
-      memory: "256Mi"
-  batchSize: 100
-  checkIntervalSeconds: 60
+      memory: "512Mi"
   hpa:
-    enabled: true
-    minReplicas: 1
-    maxReplicas: 3
-    targetCPU: 70
-    targetMemory: 80
-    scaleDownStabilization: 300
+    enabled: false
 
 writers:
   pg:
-    enabled: true
     replicas: 1
-    batchSize: 100
-    flushIntervalMs: 2000
     resources:
       requests:
-        cpu: "50m"
-        memory: "128Mi"
-      limits:
-        cpu: "250m"
+        cpu: "100m"
         memory: "256Mi"
-    hpa:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 2
-      targetCPU: 70
-      targetMemory: 80
+      limits:
+        memory: "1Gi"
   ch:
-    enabled: true
     replicas: 1
-    batchSize: 500
-    flushIntervalMs: 5000
-    resources:
-      requests:
-        cpu: "50m"
-        memory: "256Mi"
-      limits:
-        cpu: "250m"
-        memory: "512Mi"
-    hpa:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 2
-      targetCPU: 70
-      targetMemory: 80
+    batchSize: 10000
 
-pgbouncer:
-  enabled: true
-  replicas: 1
-  maxDbConnections: 10
+observability:
+  serviceMonitor:
+    enabled: true
+    interval: "30s"
+  prometheusRule:
+    enabled: true
+  grafanaDashboard:
+    enabled: true
+  alerting:
+    slackChannel: "#parsing-exporters-dev"
+
+kafka:
+  bootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"

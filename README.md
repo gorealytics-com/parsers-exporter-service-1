@@ -1,107 +1,206 @@
 # aragog-exporters
 
-Event-Driven Architecture for parsers-exporter-service: stateless exporters (Redis → Kafka) + database writers (Kafka → PostgreSQL/ClickHouse) on Kubernetes.
+Event-Driven pipeline for processing ~1M crawled records/hour: 37+ Redis queues
+→ 4 exporter types → Kafka → PostgreSQL/ClickHouse on bare-metal Kubernetes.
 
 ## Architecture
 
 ```mermaid
-graph LR
-    A[Redis queues] -->|"async BLMPOP"| B[Exporters]
-    B -->|"produce"| C[Kafka]
-    C -->|"consume"| D[Writers]
-    D -->|"batch INSERT"| E[PostgreSQL / ClickHouse]
+graph TD
+    subgraph Redis["Redis (37+ input queues)"]
+        R1["bing_map_search:items"]
+        R2["tripadvisor_search:items"]
+        R3["delivery:source_27:items"]
+        R4["delivery:source_27:sitemap:items"]
+        R5["tripadvisor_reviews:items"]
+        R6["...34 more queues"]
+    end
+
+    subgraph Exporters["Exporter Pods (4 Deployment types)"]
+        E1["MapExporter<br/>8 map sources"]
+        E2["DeliveryExporter<br/>23 delivery sources"]
+        E3["SitemapExporter<br/>3 sitemap sources"]
+        E4["ReviewsExporter<br/>6 review sources"]
+    end
+
+    subgraph Kafka["Kafka (4 data-type topics)"]
+        K1["orgs.validated.v1<br/>6 partitions"]
+        K2["reviews.validated.v1<br/>6 partitions"]
+        K3["orgs.dlq.v1"]
+        K4["reviews.dlq.v1"]
+    end
+
+    subgraph Writers["Writer Pods (2 Deployment types)"]
+        W1["pg-writer<br/>COPY upsert via PgBouncer"]
+        W2["ch-writer<br/>batch INSERT 50K+ rows"]
+    end
+
+    subgraph DB["Databases"]
+        PG["PostgreSQL<br/>28 schemas, 84 tables"]
+        CH["ClickHouse<br/>6 databases, MergeTree"]
+    end
+
+    R1 & R2 --> E1
+    R3 --> E2
+    R4 --> E3
+    R5 --> E4
+
+    E1 & E2 & E3 -->|"msgspec encode"| K1
+    E4 -->|"msgspec encode"| K2
+
+    K1 --> W1
+    K2 --> W2
+
+    W1 -->|"asyncpg COPY"| PG
+    W2 -->|"clickhouse-connect"| CH
+
+    W1 -.->|"on failure"| K3
+    W2 -.->|"on failure"| K4
 ```
 
-**5 layers separated by Kafka:**
+## Exporter class hierarchy
 
-1. **Redis** — input queues from crawlers/parsers (37 queues)
-2. **Exporters** — stateless pods: validate, transform, produce to Kafka (scale 1→20 via HPA)
-3. **Kafka** — shock absorber: `orgs.validated.v1` + `reviews.validated.v1` + DLQ topics
-4. **Writers** — database pods: consume from Kafka, batch upsert (scale 1→12 via HPA)
-5. **Observability** — Prometheus metrics, Grafana dashboards, Slack alerting
+```mermaid
+classDiagram
+    class BaseValidator {
+        <<abstract>>
+        +config: ExporterConfig
+        +validate_batch(raw_items, redis, metrics)*
+        +partition_key(item)*
+        +on_startup(redis)
+        +on_shutdown()
+        +apply_middlewares(item)
+    }
 
-## Pipeline flow
+    class OrgValidator {
+        +HASH_KEYS: list
+        +validate_batch() → org+contacts+menu envelope
+        +partition_key() → place_id
+        -_hash_middleware()
+        -_prepare_item_data()
+    }
+
+    class ReviewValidator {
+        +validate_batch() → review envelope
+        +partition_key() → source_review_id
+        +on_startup() → dupefilter prefill from CH
+        -_dedup_pipeline() → Redis SADD
+        -_validate_review() → date filter ≥2020
+        -_review_middleware()
+    }
+
+    BaseValidator <|-- OrgValidator
+    BaseValidator <|-- ReviewValidator
+
+    OrgValidator <-- MapExporter : "uses"
+    OrgValidator <-- DeliveryExporter : "same validator"
+    OrgValidator <-- SitemapExporter : "same validator"
+    ReviewValidator <-- ReviewsExporter : "uses"
+
+    class ExporterRunner {
+        +start() → connect + main loop
+        +stop() → flush + close
+        -_process_batch() → pop → validate → produce
+    }
+
+    ExporterRunner --> BaseValidator : "delegates to"
+```
+
+## CI/CD pipeline
 
 ```mermaid
 graph LR
-    A["Pre-commit<br/>ruff + isort"] --> B["CI<br/>lint + test"]
-    B --> C["Semantic Release<br/>tag = version"]
-    C --> D["Docker build<br/>ghcr.io"]
-    D --> E["Chart version bump"]
-    E --> F["ArgoCD sync<br/>dev / stage / prod"]
-    F --> G["ServiceMonitor<br/>Prometheus"]
-    G --> H["Grafana<br/>dashboards"]
-    H --> I["Alertmanager<br/>→ Slack"]
+    A["git push"] --> B["GitHub Actions CI<br/>ruff + pytest"]
+    B --> C["Semantic Release<br/>v1.3.0 tag"]
+    C --> D["Docker matrix<br/>6 images → ghcr.io"]
+    D --> E["Chart.yaml bump<br/>appVersion: v1.3.0"]
+    E --> F["ArgoCD sync"]
+    F --> G1["dev auto-sync"]
+    F --> G2["stage auto-sync"]
+    F --> G3["prod manual sync"]
 ```
 
 ## Tech stack
 
-- **Python 3.10+**, asyncio, single-process per pod
+- **Python 3.10+**, asyncio single event loop per pod, **uvloop** for 2-4x I/O
+- **msgspec** — JSON serialization/validation (replaces orjson, 12x faster than
+  Pydantic)
 - **aiokafka** — async Kafka producer/consumer
-- **asyncpg** — async PostgreSQL via PgBouncer
-- **clickhouse-connect** — ClickHouse native protocol
+- **asyncpg** — async PostgreSQL with COPY-based upsert via PgBouncer
+- **clickhouse-connect** — ClickHouse native protocol (sync, in executor)
 - **loguru** — structured JSON logging (Loki-compatible)
-- **prometheus-client** — per-pod /metrics endpoint
+- **prometheus-client** — per-pod `/metrics` endpoint
 - **UV** — dependency management with workspace and lockfile
 - **Helm** — unified chart with per-environment values
-- **HPA** — autoscaling by CPU/memory (built-in K8s, no extra operators)
-- **Vault Agent Injector** — secrets injection into pods
+- **HPA** — autoscaling by CPU/memory
+- **Vault Agent Injector** — secrets injection via pod annotations
 - **ArgoCD** — GitOps deployment (dev/stage/prod)
+- **Semantic Release** — auto-versioning, Docker tag = Git tag = Chart
+  appVersion
 
-## Project structure
-
-```
-aragog-exporters/
-├── services/
-│   ├── exporter-base/          Shared: async runner, Redis reader, Kafka producer
-│   ├── org-exporter/           Org validation (ported from cartography.py)
-│   ├── review-exporter/        Review dedup + validation (ported from reviews.py)
-│   ├── pg-writer/              Kafka → PostgreSQL batch upsert
-│   └── ch-writer/              Kafka → ClickHouse batch insert
-├── libs/
-│   ├── common/                 Models, health checks, Telegram notifier
-│   └── observability/          Prometheus metrics, loguru logging
-├── helm/aragog-exporters/      Unified Helm chart
-│   ├── values.yaml             All 37 exporter configs
-│   ├── values-dev.yaml         Dev overrides (Vault dev path)
-│   ├── values-stage.yaml       Stage overrides
-│   ├── values-prod.yaml        Prod overrides (Vault prod path)
-│   ├── dashboards/             Grafana dashboard JSONs
-│   └── templates/              K8s manifests
-├── argocd/                     ArgoCD Application manifests (dev/stage/prod)
-├── docker/                     Multi-stage Dockerfiles (UV-based)
-├── init-scripts/               PostgreSQL + ClickHouse DDL
-├── docs/                       Documentation + legacy archive
-└── .github/workflows/          CI/CD pipelines
-```
-
-## Quick start (local dev)
+## Quick start
 
 ```bash
-# Start infrastructure
+# Start infrastructure (Redis, PG, PgBouncer, CH, Kafka, Kafka UI)
 docker compose -f docker-compose.dev.yml up -d
 
-# Install dependencies
-uv sync
+# Start full pipeline including exporters and writers
+docker compose -f docker-compose.dev.yml --profile app up -d --build
 
-# Run an exporter locally
-REDIS_URL=redis://localhost:6379 \
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
-EXPORTER_NAME=test REDIS_QUEUE=test:items \
-KAFKA_TOPIC=orgs.validated.v1 SCHEMA=source_42 \
-python -m services.org-exporter.main
+# Or run a single exporter locally
+uv sync
+REDIS_URL=redis://localhost:16379/0 \
+KAFKA_BOOTSTRAP_SERVERS=localhost:19092 \
+EXPORTER_NAME=bing_map_search \
+REDIS_QUEUE=bing_map_search:items \
+KAFKA_TOPIC=orgs.validated.v1 \
+SCHEMA=source_42 \
+SOURCE_NAME="Bing Org Update" \
+BATCH_SIZE=100 \
+LOG_LEVEL=DEBUG \
+  uv run python -m org_exporter.main
 ```
+
+## Adding a new source (zero code changes)
+
+1. Add entry to `helm/aragog-exporters/values.yaml`:
+   ```yaml
+   my_new_source:
+       type: organization
+       queue: "my_source:items"
+       schema: source_99
+       sourceName: "My Source"
+       batchSize: 10000
+   ```
+2. Create PostgreSQL schema: `CREATE SCHEMA source_99` + 3 tables DDL
+3. `git push` → ArgoCD syncs → new pod starts automatically
 
 ## Code conventions
 
-- **Formatter**: ruff + isort (pre-commit hooks)
-- **Types**: Python 3.10+ built-in (`dict`, `list`, `tuple | None`)
+- **Formatting**: ruff + isort (pre-commit hooks), line length 120
+- **Types**: Python 3.10+ built-in (`dict`, `list`, `str | None`), never
+  `typing.Optional`
+- **Serialization**: msgspec only, never orjson/json/pydantic
 - **Docstrings**: Google style on all public functions
 - **Logging**: loguru only, never `print()` or stdlib `logging`
 - **Banned**: `multiprocessing`, `dask`, sync Redis in exporters
 
+## Monitoring
+
+- **Grafana**: [dev](https://grafana.dev.k8s.rea/login) |
+  [prod](https://grafana.prod.k8s.rea)
+- **ArgoCD**: [dev](https://argocd.dev.rea/applications) |
+  [prod](https://argocd.prod.rea/applications)
+- **Vault**: [vault.rea:8200/ui](https://vault.rea:8200/ui)
+- **Slack alerts**: `#parsing-exporters-dev` / `#parsing-exporters-stage` /
+  `#parsing-exporters-prod`
+
 ## Deployment
 
-Push to `main` → Semantic Release → Docker build (ghcr.io) → Chart version bump → ArgoCD auto-sync.
+| Branch    | Environment | Docker tag             | Sync   |
+| --------- | ----------- | ---------------------- | ------ |
+| `develop` | dev         | `dev-{sha}`            | auto   |
+| `staging` | stage       | `stage-{sha}`          | auto   |
+| `main`    | prod        | `v{semver}` + `latest` | manual |
 
 See `docs/agents.md` for the full AI agent development guide.

@@ -3,7 +3,7 @@
 Used by all services. Runs as a background asyncio task alongside the main loop.
 """
 
-from typing import Optional
+from collections.abc import Callable
 
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 
 def create_health_app(
     service_name: str,
-    readiness_check: Optional[callable] = None,
+    readiness_check: Callable[..., bool] | None = None,
 ) -> FastAPI:
     """Create a minimal FastAPI app for K8s probes and Prometheus scraping.
 

@@ -1,0 +1,20 @@
+[project]
+name = "ch-writer"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "libs-common",
+    "libs-observability",
+    "msgspec>=0.19",
+    "clickhouse-connect>=0.7",
+    "aiokafka>=0.10",
+    "loguru>=0.7",
+    "prometheus-client>=0.20",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "uvloop>=0.21;sys_platform!='win32'",
+]
+
+[tool.uv.sources]
+libs-common = { workspace = true }
+libs-observability = { workspace = true }

@@ -1,0 +1,18 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "extraPaths": [
+    "services/exporter-base",
+    "services/org-exporter",
+    "services/delivery-exporter",
+    "services/sitemap-exporter",
+    "services/review-exporter",
+    "services/pg-writer",
+    "services/ch-writer",
+    "libs",
+    "libs/common",
+    "libs/observability"
+  ],
+  "reportOptionalMemberAccess": "warning"
+}

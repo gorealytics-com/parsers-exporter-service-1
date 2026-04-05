@@ -14,13 +14,10 @@ Environment:
   VALUES_FILE       — path to values.yaml (default: helm/aragog-exporters/values.yaml)
 """
 
-import json
 import logging
 import os
 import random
-import sys
 import uuid
-from datetime import datetime, timedelta
 from hashlib import sha1
 
 import orjson
@@ -100,9 +97,7 @@ def generate_org_item() -> dict:
 
 def generate_review_item(source_name: str) -> dict:
     """Generate a synthetic review record."""
-    review_date = fake.date_time_between(
-        start_date="-2y", end_date="now"
-    )
+    review_date = fake.date_time_between(start_date="-2y", end_date="now")
     return {
         "source_product_id": sha1(fake.uuid4().encode()).hexdigest()[:20],
         "review_language": random.choice(["en", "ru", "de", "fr", "ja"]),
@@ -126,23 +121,33 @@ def load_queues() -> list:
     """Load queue definitions from values.yaml."""
     queues = []
     try:
-        with open(VALUES_FILE, "r") as f:
+        with open(VALUES_FILE) as f:
             values = yaml.safe_load(f)
         for name, cfg in values.get("exporters", {}).items():
-            queues.append({
-                "name": name,
-                "queue": cfg["queue"],
-                "type": cfg.get("type", "organization"),
-                "source_name": cfg.get("sourceName", name),
-            })
+            queues.append(
+                {
+                    "name": name,
+                    "queue": cfg["queue"],
+                    "type": cfg.get("type", "organization"),
+                    "source_name": cfg.get("sourceName", name),
+                }
+            )
     except FileNotFoundError:
         log.warning("values.yaml not found at %s, using env fallback", VALUES_FILE)
         # Fallback: minimal set for dev
         queues = [
-            {"name": "bing-map-search", "queue": "bing_map_search:items",
-             "type": "organization", "source_name": "Bing"},
-            {"name": "tripadvisor-reviews", "queue": "tripadvisor_reviews:items",
-             "type": "reviews", "source_name": "Tripadvisor"},
+            {
+                "name": "bing-map-search",
+                "queue": "bing_map_search:items",
+                "type": "organization",
+                "source_name": "Bing",
+            },
+            {
+                "name": "tripadvisor-reviews",
+                "queue": "tripadvisor_reviews:items",
+                "type": "reviews",
+                "source_name": "Tripadvisor",
+            },
         ]
     return queues
 

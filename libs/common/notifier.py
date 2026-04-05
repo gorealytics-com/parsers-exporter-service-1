@@ -11,7 +11,6 @@ for critical error notifications.
 
 import io
 import os
-from typing import Optional
 
 import aiohttp
 from loguru import logger
@@ -22,8 +21,8 @@ class TelegramNotifier:
 
     def __init__(
         self,
-        bot_token: Optional[str] = None,
-        chat_id: Optional[str] = None,
+        bot_token: str | None = None,
+        chat_id: str | None = None,
     ) -> None:
         self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -56,9 +55,7 @@ class TelegramNotifier:
         except Exception as e:
             logger.warning(f"Telegram send_message failed: {e}")
 
-    async def send_document(
-        self, data: bytes, filename: str, caption: str
-    ) -> None:
+    async def send_document(self, data: bytes, filename: str, caption: str) -> None:
         """Send a file document to the configured Telegram chat."""
         if not self._enabled:
             return
